@@ -4,10 +4,11 @@
 .env
 .env.*
 !.env.example
-hush-hush
-hush-hush.exe
-hush
-hush.exe
+# Compiled binaries — anchor to repo root so the cmd/hush/ source dir isn't excluded.
+/hush-hush
+/hush-hush.exe
+/hush
+/hush.exe
 /dist/
 /tmp/
 

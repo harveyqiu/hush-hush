@@ -14,7 +14,7 @@ import (
 
 func TestRun_HelpExitsZero(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	code := run([]string{"help"}, &out, &errBuf)
+	code := run([]string{"help"}, nil, &out, &errBuf)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
@@ -25,7 +25,7 @@ func TestRun_HelpExitsZero(t *testing.T) {
 
 func TestRun_NoArgsExitsTwo(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	code := run(nil, &out, &errBuf)
+	code := run(nil, nil, &out, &errBuf)
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
@@ -33,7 +33,7 @@ func TestRun_NoArgsExitsTwo(t *testing.T) {
 
 func TestRun_UnknownCommandExitsTwo(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	code := run([]string{"nosuch"}, &out, &errBuf)
+	code := run([]string{"nosuch"}, nil, &out, &errBuf)
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
@@ -46,7 +46,7 @@ func TestRun_LoginDispatch(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HUSH_CONFIG_DIR", dir)
 	var out, errBuf bytes.Buffer
-	code := run([]string{"login", "--url", "https://example", "--token", "tok"}, &out, &errBuf)
+	code := run([]string{"login", "--url", "https://example", "--token", "tok"}, nil, &out, &errBuf)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (stderr=%s)", code, errBuf.String())
 	}
@@ -56,7 +56,7 @@ func TestRun_LoginMissingFlagsExitsOne(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HUSH_CONFIG_DIR", dir)
 	var out, errBuf bytes.Buffer
-	code := run([]string{"login", "--url", "https://example"}, &out, &errBuf)
+	code := run([]string{"login", "--url", "https://example"}, nil, &out, &errBuf)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1, stderr=%s", code, errBuf.String())
 	}

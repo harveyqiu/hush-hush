@@ -8,7 +8,7 @@
 
 A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest. Deploys to Railway in five minutes, runs anywhere a Go binary can run.
 
-Built as a personal portfolio project — small enough to read in one sitting (~410 lines + tests), real enough to actually use.
+Built as a personal portfolio project — small enough to read in one sitting (~1.2k lines + tests), real enough to actually use.
 
 ## What this is
 
@@ -24,7 +24,7 @@ A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets
 
 **Server-side encryption is intentional.** The master key is provided as an environment variable to the running process. If the host is compromised, both key and ciphertext are exposed — this design protects against stolen DB backups / volume snapshots, not host compromise.
 
-If you need client-side encryption (the user types a passphrase to decrypt locally), use Bitwarden / Vaultwarden instead. A future v2 here may add client-side crypto when there's a CLI to drive it.
+If you need client-side encryption (the user types a passphrase to decrypt locally), use Bitwarden / Vaultwarden instead. A v2 effort will revisit this now that the CLI exists.
 
 **Single-user.** A single bearer token guards all routes. No users, no ACLs, no audit log.
 
@@ -141,6 +141,49 @@ curl -X DELETE $URL/v1/secrets/openai-key \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## CLI
+
+A thin client lives in [`cmd/hush`](cmd/hush). Install:
+
+```bash
+go install github.com/cjunks94/hush-hush/cmd/hush@latest
+```
+
+Configure once, then forget the URL and token exist:
+
+```bash
+hush login --url https://<your-app>.up.railway.app --token <AUTH_TOKEN>
+# writes ~/.config/hush/config.json (mode 0600)
+
+hush health
+# https://...: reachable
+# auth: ok
+```
+
+Day-to-day use:
+
+```bash
+# Write
+hush put openai-key "sk-..."          # positional value
+hush put openai-key --from-file ./key # from a file
+echo "sk-..." | hush put openai-key --from-stdin
+hush put openai-key                   # interactive no-echo prompt (TTY only)
+
+# Read — value-only output, pipe-friendly
+hush get openai-key
+hush get openai-key | clip            # Windows
+hush get openai-key | pbcopy          # macOS
+
+# List
+hush list                             # table
+hush list --json                      # machine-readable
+
+# Delete
+hush delete openai-key                # idempotent
+```
+
+**Config precedence:** `--url`/`--token` flag > `HUSH_URL`/`HUSH_TOKEN` env > config file. Useful for one-off invocations against a non-default server without re-running `login`.
+
 ## Local development
 
 ```bash
@@ -177,8 +220,7 @@ Tool versions are pinned to specific tags / commit SHAs to defeat `@latest` supp
 
 ## Limitations (deliberately not in v1)
 
-- **No CLI.** HTTP API only. A `hush get FOO` / `hush set FOO bar` wrapper is the natural next addition.
-- **No client-side encryption.** Master key sits on the server (see threat model).
+- **No client-side encryption.** Master key sits on the server (see threat model). A v2 effort will revisit this now that the CLI exists.
 - **No rotation tooling.** If the master key leaks, recovery is manual: rotate, decrypt all rows under old key, re-encrypt under new key, swap env var.
 - **No rate limiting** beyond Railway's edge default.
 - **No audit log** of who-read-what.
