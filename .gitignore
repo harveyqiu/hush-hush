@@ -6,6 +6,8 @@
 !.env.example
 hush-hush
 hush-hush.exe
+hush
+hush.exe
 /dist/
 /tmp/
 
