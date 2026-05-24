@@ -1,0 +1,34 @@
+# Codecov configuration.
+#
+# Patch target = 70% — the floor for net-new code in a PR.
+#
+# Why 70% and not "auto" (= current base coverage):
+#   - The base ratchets up with each PR that beats it, then becomes a
+#     hidden tax on the next PR that touches IO / crypto / signal-handling
+#     code, where many branches (rand failure, fsync error, etc.) can't be
+#     hit from unit tests without dependency-injection plumbing that costs
+#     more than the coverage gain.
+#   - Prior PRs in this repo have cleared 70% comfortably (#11 at 86%,
+#     #12 at 86%, server at ~68% before the dedicated coverage bump).
+#   - A fixed 70% floor + 2% project threshold gives review-time slack
+#     without abandoning the standard.
+#
+# If a future PR repeatedly clears 80% and then a follow-up regresses
+# the package average, the project threshold catches that.
+
+coverage:
+  precision: 2
+  round: down
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+    patch:
+      default:
+        target: 70%
+        threshold: 0%
+
+# Test files (*_test.go) are excluded from coverage by codecov's default
+# Go preset. Explicit ignores would be redundant.

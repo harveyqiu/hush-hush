@@ -28,6 +28,7 @@ Commands:
   put NAME [VALUE] Create/update a secret. Sources: arg | --from-file | --from-stdin | TTY prompt
   delete NAME      Remove a secret (idempotent)
   list             List all secrets (table; --json for JSON)
+  init             Create a client-encryption vault (v2; opt-in)
   help             Show this message
 
 Global flags (accepted by network commands):
@@ -70,6 +71,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdDelete(ctx, rest, stdout)
 	case "list":
 		err = cmdList(ctx, rest, stdout)
+	case "init":
+		err = cmdInit(rest, stdout, promptNoEcho)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -353,4 +356,59 @@ func fmtTime(unix int64) string {
 		return "-"
 	}
 	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+// cmdInit creates the client-side-encryption vault. promptFn is injected
+// so tests can supply a deterministic passphrase without a TTY.
+func cmdInit(args []string, stdout io.Writer, promptFn func(prompt string) (string, error)) error {
+	fs := newFlagSet("init")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	if extra := fs.Args(); len(extra) > 0 {
+		return fmt.Errorf("init: unexpected arguments: %s", strings.Join(extra, " "))
+	}
+	// Preflight existence check: avoid asking for a passphrase if the
+	// operation can't succeed. saveNewVault still uses O_EXCL for the
+	// actual race-free guarantee — this is purely a UX optimization.
+	vp, err := vaultPath()
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	if _, statErr := os.Stat(vp); statErr == nil {
+		return fmt.Errorf("init: %w", errVaultExists)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("init: %w", statErr)
+	}
+
+	p1, err := promptFn("vault passphrase: ")
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	if p1 == "" {
+		return errors.New("init: passphrase cannot be empty")
+	}
+	p2, err := promptFn("confirm passphrase: ")
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	if p1 != p2 {
+		return errors.New("init: passphrases do not match")
+	}
+
+	salt, err := newSalt()
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	if _, err := initVault(p1, defaultKDFParams(salt)); err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+	p, _ := vaultPath()
+	fmt.Fprintf(stdout, "vault initialized at %s (mode 0600)\n", p)
+	// Loud-and-once warning. The passphrase is irrecoverable; failing
+	// silent here would be the worst possible UX.
+	fmt.Fprintln(stdout, "")
+	fmt.Fprintln(stdout, "IMPORTANT: back up this passphrase somewhere safe.")
+	fmt.Fprintln(stdout, "If you lose it, every v2-encrypted secret in your vault is unrecoverable.")
+	return nil
 }
