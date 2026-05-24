@@ -64,9 +64,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "health":
 		err = cmdHealth(ctx, rest, stdout)
 	case "get":
-		err = cmdGet(ctx, rest, stdout)
+		err = cmdGet(ctx, rest, stdout, promptNoEcho)
 	case "put":
-		err = cmdPut(ctx, rest, stdin, stdout)
+		err = cmdPut(ctx, rest, stdin, stdout, promptNoEcho)
 	case "delete":
 		err = cmdDelete(ctx, rest, stdout)
 	case "list":
@@ -202,7 +202,7 @@ func splitNameAndRest(args []string) (string, []string) {
 	return args[0], args[1:]
 }
 
-func cmdGet(ctx context.Context, args []string, stdout io.Writer) error {
+func cmdGet(ctx context.Context, args []string, stdout io.Writer, promptFn func(prompt string) (string, error)) error {
 	name, rest := splitNameAndRest(args)
 	fs := newFlagSet("get")
 	flagURL, flagToken := connFlags(fs)
@@ -215,6 +215,13 @@ func cmdGet(ctx context.Context, args []string, stdout io.Writer) error {
 	if name == "" {
 		return errors.New("get: NAME is required")
 	}
+	// Unlock BEFORE the network round-trip so a wrong passphrase fails
+	// fast and doesn't surface as "decrypt failed" after the server has
+	// already returned the (encrypted) value.
+	key, err := unlockIfPresent(promptFn)
+	if err != nil {
+		return fmt.Errorf("get: %w", err)
+	}
 	c, err := resolveClient(*flagURL, *flagToken)
 	if err != nil {
 		return err
@@ -223,14 +230,45 @@ func cmdGet(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return wrapErr("get", err)
 	}
+	value, err := maybeDecrypt(key, name, s.Value)
+	if err != nil {
+		return fmt.Errorf("get: %w", err)
+	}
 	// No trailing newline: lets `hush get FOO | clip` round-trip the value
 	// exactly as stored, without surprising callers who don't want a stray
 	// "\n" tacked on.
-	fmt.Fprint(stdout, s.Value)
+	fmt.Fprint(stdout, value)
 	return nil
 }
 
-func cmdPut(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
+// maybeDecrypt is the bridge between the wire format and the user-facing
+// value. Decision tree:
+//   - no vault                            → passthrough (we have no key
+//     to decrypt with; the hh2: prefix on a no-vault value can only be
+//     a legitimate plaintext that happens to start with it)
+//   - vault active + value has hh2: prefix → decrypt with name-bound AAD
+//   - vault active + value is plaintext    → refuse, point at hush migrate
+//
+// Collision note: cmdPut refuses to write plaintext that starts with
+// hh2: when no vault is active, so a no-vault read of a hh2:-prefixed
+// value can only be a legacy v1 value from before that check existed.
+// Passing it through is the safe choice — the user can copy it and
+// decide what to do.
+func maybeDecrypt(key []byte, name, wireValue string) (string, error) {
+	if key == nil {
+		return wireValue, nil
+	}
+	if strings.HasPrefix(wireValue, vaultPrefix) {
+		pt, err := decryptWireFormat(key, wireValue, []byte(name))
+		if err != nil {
+			return "", err
+		}
+		return string(pt), nil
+	}
+	return "", fmt.Errorf("%q is a v1 plaintext secret; run `hush migrate` to convert it", name)
+}
+
+func cmdPut(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, promptFn func(prompt string) (string, error)) error {
 	name, rest := splitNameAndRest(args)
 	// A second positional, before any flags, is the value.
 	var positionalValue string
@@ -273,11 +311,33 @@ func cmdPut(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		return fmt.Errorf("put: %w", err)
 	}
 
+	// Unlock BEFORE encrypting so a wrong passphrase doesn't push silently
+	// corrupted ciphertext to the server. unlock validates against the
+	// verify blob; if the passphrase is wrong, we bail before any I/O.
+	key, err := unlockIfPresent(promptFn)
+	if err != nil {
+		return fmt.Errorf("put: %w", err)
+	}
+	wireValue := value
+	if key != nil {
+		wireValue, err = encryptWireFormat(key, []byte(value), []byte(name))
+		if err != nil {
+			return fmt.Errorf("put: encrypt: %w", err)
+		}
+	} else if strings.HasPrefix(value, vaultPrefix) {
+		// Reserve the hh2: prefix on the plaintext write path. Without
+		// this, a no-vault user could put a value like "hh2:something"
+		// today and find it ambiguous tomorrow after `hush init` — the
+		// get path can't tell ciphertext from plaintext-that-looks-like-
+		// ciphertext.
+		return fmt.Errorf("put: values starting with %q are reserved for client-encrypted secrets; run `hush init` to encrypt or choose a different value", vaultPrefix)
+	}
+
 	c, err := resolveClient(*flagURL, *flagToken)
 	if err != nil {
 		return err
 	}
-	if _, err := c.Put(ctx, name, value); err != nil {
+	if _, err := c.Put(ctx, name, wireValue); err != nil {
 		return wrapErr("put", err)
 	}
 	// "saved" instead of "created"/"updated": the server's response is

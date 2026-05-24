@@ -210,6 +210,26 @@ func saveNewVault(cfg VaultConfig) error {
 	return nil
 }
 
+// unlockIfPresent is the standard "do I have a vault, and if so, get me
+// the key" entry point for network subcommands. Returns (nil, nil) when
+// no vault exists — callers should treat that as "operate in v1 plaintext
+// passthrough mode." Returns (key, nil) when a vault exists and the
+// user-supplied passphrase unlocks it. promptFn is called exactly once.
+func unlockIfPresent(promptFn func(prompt string) (string, error)) ([]byte, error) {
+	cfg, err := loadVault()
+	if errors.Is(err, errVaultMissing) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pass, err := promptFn("vault passphrase: ")
+	if err != nil {
+		return nil, err
+	}
+	return unlock(cfg, pass)
+}
+
 // unlock derives the vault key from the passphrase and validates it
 // against the stored verify blob. Returns errBadPassphrase on tag
 // mismatch — distinguishable from corruption / IO errors so the CLI can

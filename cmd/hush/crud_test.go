@@ -15,6 +15,18 @@ import (
 
 // ---- client method tests ----
 
+// neverPrompt is a stub passed to cmdGet/cmdPut in tests where no vault
+// is configured, so promptFn must never be invoked. If it is, t.Fatalf
+// breaks the test immediately — silent default-on-call would let a
+// regression silently bypass an unexpected vault prompt.
+func neverPrompt(t *testing.T) func(string) (string, error) {
+	return func(prompt string) (string, error) {
+		t.Helper()
+		t.Fatalf("unexpected prompt: %q", prompt)
+		return "", nil
+	}
+}
+
 func TestClient_GetRoundTrip(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/secrets/api-key" {
@@ -262,7 +274,7 @@ func TestCmdGet_PrintsValue(t *testing.T) {
 	setEnvConfig(t, fs.srv.URL, "tok")
 
 	var out bytes.Buffer
-	if err := cmdGet(context.Background(), []string{"api-key"}, &out); err != nil {
+	if err := cmdGet(context.Background(), []string{"api-key"}, &out, neverPrompt(t)); err != nil {
 		t.Fatalf("cmdGet: %v", err)
 	}
 	if out.String() != "shhh" {
@@ -273,7 +285,7 @@ func TestCmdGet_PrintsValue(t *testing.T) {
 func TestCmdGet_MissingNameError(t *testing.T) {
 	setEnvConfig(t, "https://example", "tok")
 	var out bytes.Buffer
-	err := cmdGet(context.Background(), nil, &out)
+	err := cmdGet(context.Background(), nil, &out, neverPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), "NAME is required") {
 		t.Errorf("got %v", err)
 	}
@@ -284,7 +296,7 @@ func TestCmdPut_PositionalValueSaves(t *testing.T) {
 	setEnvConfig(t, srv.srv.URL, "tok")
 
 	var out bytes.Buffer
-	err := cmdPut(context.Background(), []string{"foo", "bar"}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo", "bar"}, nil, &out, neverPrompt(t))
 	if err != nil {
 		t.Fatalf("cmdPut: %v", err)
 	}
@@ -303,7 +315,7 @@ func TestCmdPut_ValueAfterFlags(t *testing.T) {
 	srv := newFakeServer(t)
 	setEnvConfig(t, "https://wrong.invalid", "tok") // force --url override path
 	var out bytes.Buffer
-	err := cmdPut(context.Background(), []string{"foo", "--url=" + srv.srv.URL, "bar"}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo", "--url=" + srv.srv.URL, "bar"}, nil, &out, neverPrompt(t))
 	if err != nil {
 		t.Fatalf("cmdPut: %v", err)
 	}
@@ -318,7 +330,7 @@ func TestCmdPut_FromStdin(t *testing.T) {
 
 	var out bytes.Buffer
 	stdin := strings.NewReader("piped-value\n")
-	err := cmdPut(context.Background(), []string{"foo", "--from-stdin"}, stdin, &out)
+	err := cmdPut(context.Background(), []string{"foo", "--from-stdin"}, stdin, &out, neverPrompt(t))
 	if err != nil {
 		t.Fatalf("cmdPut: %v", err)
 	}
@@ -338,7 +350,7 @@ func TestCmdPut_FromFile(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := cmdPut(context.Background(), []string{"foo", "--from-file=" + p}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo", "--from-file=" + p}, nil, &out, neverPrompt(t))
 	if err != nil {
 		t.Fatalf("cmdPut: %v", err)
 	}
@@ -352,11 +364,11 @@ func TestCmdPut_SecondPutAlsoSaves(t *testing.T) {
 	setEnvConfig(t, srv.srv.URL, "tok")
 
 	var out bytes.Buffer
-	if err := cmdPut(context.Background(), []string{"foo", "first"}, nil, &out); err != nil {
+	if err := cmdPut(context.Background(), []string{"foo", "first"}, nil, &out, neverPrompt(t)); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := cmdPut(context.Background(), []string{"foo", "second"}, nil, &out); err != nil {
+	if err := cmdPut(context.Background(), []string{"foo", "second"}, nil, &out, neverPrompt(t)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "foo: saved") {
@@ -374,7 +386,7 @@ func TestCmdPut_NoValueSourceErrors(t *testing.T) {
 	var out bytes.Buffer
 	// stdin is nil and we can't fake a TTY in unit tests; resolve() falls
 	// through to errNoValueSource.
-	err := cmdPut(context.Background(), []string{"foo"}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo"}, nil, &out, neverPrompt(t))
 	if err == nil {
 		t.Fatal("expected error when no value source available")
 	}
@@ -582,7 +594,7 @@ func TestCmdGet_NotFoundSurfaceError(t *testing.T) {
 	setEnvConfig(t, fs.srv.URL, "tok")
 
 	var out bytes.Buffer
-	err := cmdGet(context.Background(), []string{"missing"}, &out)
+	err := cmdGet(context.Background(), []string{"missing"}, &out, neverPrompt(t))
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
@@ -597,7 +609,7 @@ func TestCmdPut_ServerErrorSurfaced(t *testing.T) {
 	setEnvConfig(t, srv.URL, "tok")
 
 	var out bytes.Buffer
-	err := cmdPut(context.Background(), []string{"foo", "v"}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo", "v"}, nil, &out, neverPrompt(t))
 	if err == nil {
 		t.Fatal("expected server error to surface")
 	}
@@ -643,7 +655,7 @@ func TestCmdDelete_MissingNameError(t *testing.T) {
 func TestCmdGet_ExtraPositionalErrors(t *testing.T) {
 	setEnvConfig(t, "https://example", "tok")
 	var out bytes.Buffer
-	err := cmdGet(context.Background(), []string{"foo", "extra"}, &out)
+	err := cmdGet(context.Background(), []string{"foo", "extra"}, &out, neverPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Errorf("got %v", err)
 	}
@@ -671,7 +683,7 @@ func TestCmdPut_TooManyPositionalsErrors(t *testing.T) {
 	setEnvConfig(t, "https://example", "tok")
 	var out bytes.Buffer
 	// `hush put foo bar --url=X baz` — bar takes the value slot, baz is left over.
-	err := cmdPut(context.Background(), []string{"foo", "bar", "--url=https://x", "baz"}, nil, &out)
+	err := cmdPut(context.Background(), []string{"foo", "bar", "--url=https://x", "baz"}, nil, &out, neverPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Errorf("got %v", err)
 	}
@@ -701,7 +713,7 @@ func TestTrimOneTrailingNewline(t *testing.T) {
 func TestCmdPut_MissingNameError(t *testing.T) {
 	setEnvConfig(t, "https://example", "tok")
 	var out bytes.Buffer
-	err := cmdPut(context.Background(), nil, nil, &out)
+	err := cmdPut(context.Background(), nil, nil, &out, neverPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), "NAME is required") {
 		t.Errorf("got %v", err)
 	}
