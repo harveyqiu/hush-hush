@@ -8,7 +8,7 @@
 
 A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest. Deploys to Railway in five minutes, runs anywhere a Go binary can run.
 
-Built as a personal portfolio project — small enough to read in one sitting (~1.2k lines + tests), real enough to actually use.
+Built as a personal portfolio project — small enough to read in one sitting (~1.8k lines + tests), real enough to actually use.
 
 ## What this is
 
@@ -22,9 +22,25 @@ A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets
 
 ## Threat model
 
-**Server-side encryption is intentional.** The master key is provided as an environment variable to the running process. If the host is compromised, both key and ciphertext are exposed — this design protects against stolen DB backups / volume snapshots, not host compromise.
+Two encryption modes, intentionally layered. **v1 is the default**; v2 is opt-in and stacks on top.
 
-If you need client-side encryption (the user types a passphrase to decrypt locally), use Bitwarden / Vaultwarden instead. A v2 effort will revisit this now that the CLI exists.
+### v1 — server-side AES-256-GCM (always on)
+
+The master key is provided as an environment variable to the running process. AAD binds both the secret name and a version byte into the AEAD tag.
+
+**Protects against:** stolen DB backups, leaked volume snapshots.
+**Does not protect against:** host compromise — if an attacker gets shell on the running container, key and ciphertext are both there.
+
+### v2 — client-side XChaCha20-Poly1305 (opt-in via `hush init`)
+
+When a user runs `hush init`, the CLI creates a local vault file (`~/.config/hush/vault.json`, 0600) containing an Argon2id-derived passphrase verifier. From then on, `hush put` / `hush get` / `hush migrate` transparently encrypt and decrypt values with the user's passphrase. The server stores opaque ciphertext under v1's existing layer — two independent layers, two independent keys.
+
+**Protects against:** host compromise. The user's passphrase never touches the server.
+**Does not protect against:** client-side compromise (laptop + passphrase stolen). Same caveat any client-side-crypto system has.
+
+**Catch:** non-CLI consumers (raw `curl` against `/v1/secrets/foo`) receive `hh2:base64...` for v2-encrypted secrets and can't decrypt them. v2 is for setups where every consumer either uses the `hush` CLI or vendors the vault decryption code.
+
+The design decisions behind v2 — KDF choice, AEAD choice, wire format, why no server-side automation — are recorded in [`docs/adr/0001-client-side-encryption.md`](docs/adr/0001-client-side-encryption.md).
 
 **Single-user.** A single bearer token guards all routes. No users, no ACLs, no audit log.
 
@@ -184,6 +200,38 @@ hush delete openai-key                # idempotent
 
 **Config precedence:** `--url`/`--token` flag > `HUSH_URL`/`HUSH_TOKEN` env > config file. Useful for one-off invocations against a non-default server without re-running `login`.
 
+### Opt-in to client-side encryption (v2)
+
+Once `hush init` is run, every `hush put` encrypts the value with the user's passphrase before sending. `hush get` reverses it. The server never sees plaintext.
+
+```bash
+hush init
+# vault passphrase: ********
+# confirm passphrase: ********
+# vault initialized at ~/.config/hush/vault.json (mode 0600)
+#
+# IMPORTANT: back up this passphrase somewhere safe.
+# If you lose it, every v2-encrypted secret in your vault is unrecoverable.
+
+# Existing v1 secrets show this hint until migrated:
+hush get legacy-secret
+# error: get: "legacy-secret" is a v1 plaintext secret; run `hush migrate` to convert it
+
+# Preview the migration scope:
+hush migrate --dry-run
+# vault passphrase: ********
+# would migrate: legacy-secret
+# done: 1 would migrate, 0 skipped (already v2), 0 errors
+
+# Do it:
+hush migrate
+# vault passphrase: ********
+# migrated: legacy-secret
+# done: 1 migrated, 0 skipped (already v2), 0 errors
+```
+
+**Before activating v2 on a deployment with non-CLI consumers**, see the threat-model "Catch" above — raw HTTP consumers can't decrypt `hh2:`-prefixed values.
+
 ## Local development
 
 ```bash
@@ -218,10 +266,11 @@ CI runs on every push, every PR, and a weekly Mon 06:00 UTC cron:
 
 Tool versions are pinned to specific tags / commit SHAs to defeat `@latest` supply-chain drift; Dependabot opens PRs to bump them as new releases ship.
 
-## Limitations (deliberately not in v1)
+## Limitations
 
-- **No client-side encryption.** Master key sits on the server (see threat model). A v2 effort will revisit this now that the CLI exists.
-- **No rotation tooling.** If the master key leaks, recovery is manual: rotate, decrypt all rows under old key, re-encrypt under new key, swap env var.
+- **Client-side encryption requires CLI consumers.** v2 (`hush init` + `hush migrate`) protects against host compromise, but raw-HTTP consumers can't decrypt `hh2:` values. Either every consumer uses the CLI / vendors the vault code, or v2 stays off for that deployment. See [`docs/adr/0001-client-side-encryption.md`](docs/adr/0001-client-side-encryption.md) for the full design discussion.
+- **No passphrase caching.** v2 prompts every command. OS keychain integration (`--remember` flag) is plausible future work, deferred for now to keep the trust surface minimal.
+- **No key-rotation tooling.** If the v1 master key leaks, recovery is manual: rotate, decrypt all rows under old key, re-encrypt under new key, swap env var. If the v2 passphrase leaks: change passphrase via re-init + manual re-puts (no automated re-key yet).
 - **No rate limiting** beyond Railway's edge default.
 - **No audit log** of who-read-what.
 - **No multi-user.**
