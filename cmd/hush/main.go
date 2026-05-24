@@ -29,6 +29,7 @@ Commands:
   delete NAME      Remove a secret (idempotent)
   list             List all secrets (table; --json for JSON)
   init             Create a client-encryption vault (v2; opt-in)
+  migrate          Re-encrypt v1 plaintext secrets under the active vault (v2)
   help             Show this message
 
 Global flags (accepted by network commands):
@@ -73,6 +74,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdList(ctx, rest, stdout)
 	case "init":
 		err = cmdInit(rest, stdout, promptNoEcho)
+	case "migrate":
+		err = cmdMigrate(ctx, rest, stdout, promptNoEcho)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -470,5 +473,91 @@ func cmdInit(args []string, stdout io.Writer, promptFn func(prompt string) (stri
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "IMPORTANT: back up this passphrase somewhere safe.")
 	fmt.Fprintln(stdout, "If you lose it, every v2-encrypted secret in your vault is unrecoverable.")
+	return nil
+}
+
+// cmdMigrate walks every secret on the server and re-puts the v1
+// plaintext values as v2 ciphertext under the active vault. Already-v2
+// secrets are skipped silently. Processes sequentially because the
+// server is single-user and parallelism would complicate error
+// handling for no real wall-clock win at personal scale.
+//
+// Continues past per-secret errors and reports them in a summary at
+// the end. Returns a non-nil error iff at least one secret failed —
+// the dispatcher maps that to exit code 1 so scripts can detect
+// partial-migration outcomes.
+func cmdMigrate(ctx context.Context, args []string, stdout io.Writer, promptFn func(prompt string) (string, error)) error {
+	fs := newFlagSet("migrate")
+	flagURL, flagToken := connFlags(fs)
+	dryRun := fs.Bool("dry-run", false, "Show what would be migrated without writing anything")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if extra := fs.Args(); len(extra) > 0 {
+		return fmt.Errorf("migrate: unexpected arguments: %s", strings.Join(extra, " "))
+	}
+
+	key, err := unlockIfPresent(promptFn)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if key == nil {
+		return errors.New("migrate: no vault configured (run `hush init` first)")
+	}
+
+	c, err := resolveClient(*flagURL, *flagToken)
+	if err != nil {
+		return err
+	}
+	secrets, err := c.List(ctx)
+	if err != nil {
+		return wrapErr("migrate: list", err)
+	}
+
+	var migrated, skipped, failed int
+	for _, s := range secrets {
+		if err := ctx.Err(); err != nil {
+			// Honor Ctrl+C mid-iteration. Anything migrated so far is
+			// already persisted; we just stop processing the rest.
+			return wrapErr("migrate", err)
+		}
+		full, err := c.Get(ctx, s.Name)
+		if err != nil {
+			fmt.Fprintf(stdout, "error: %s: get: %v\n", s.Name, err)
+			failed++
+			continue
+		}
+		if strings.HasPrefix(full.Value, vaultPrefix) {
+			skipped++
+			continue
+		}
+		if *dryRun {
+			fmt.Fprintf(stdout, "would migrate: %s\n", s.Name)
+			migrated++
+			continue
+		}
+		ct, err := encryptWireFormat(key, []byte(full.Value), []byte(s.Name))
+		if err != nil {
+			fmt.Fprintf(stdout, "error: %s: encrypt: %v\n", s.Name, err)
+			failed++
+			continue
+		}
+		if _, err := c.Put(ctx, s.Name, ct); err != nil {
+			fmt.Fprintf(stdout, "error: %s: put: %v\n", s.Name, err)
+			failed++
+			continue
+		}
+		fmt.Fprintf(stdout, "migrated: %s\n", s.Name)
+		migrated++
+	}
+
+	verb := "migrated"
+	if *dryRun {
+		verb = "would migrate"
+	}
+	fmt.Fprintf(stdout, "done: %d %s, %d skipped (already v2), %d errors\n", migrated, verb, skipped, failed)
+	if failed > 0 {
+		return fmt.Errorf("migrate: %d secret(s) failed", failed)
+	}
 	return nil
 }
