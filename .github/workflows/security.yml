@@ -37,6 +37,40 @@ jobs:
           # Don't break CI if the upload fails (Codecov unreachable, etc.)
           fail_ci_if_error: false
 
+  docker:
+    # Builds the published image and smoke-tests it the way compose runs
+    # it: non-root, read-only rootfs, no capabilities, key from a file.
+    name: docker image build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: docker build -t hush-hush:ci .
+      - name: Smoke test
+        run: |
+          set -eu
+          openssl rand -base64 32 > master_key
+          sudo chown 65532:65532 master_key && sudo chmod 400 master_key
+          docker run -d --name hush -p 127.0.0.1:8080:8080 \
+            -v "$PWD/master_key:/run/secrets/master_key:ro" \
+            -e MASTER_KEY_FILE=/run/secrets/master_key \
+            --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges hush-hush:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' hush)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f '{{.State.Health.Status}}' hush | grep -qx healthy
+          TOKEN=$(docker exec hush hush-hush token create --name ci --role admin 2>/dev/null)
+          curl -fsS -X PUT http://127.0.0.1:8080/v1/secrets/ci.check \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"value":"ok"}'
+          curl -fsS http://127.0.0.1:8080/v1/secrets/ci.check -H "Authorization: Bearer $TOKEN" | grep -q '"value":"ok"'
+          curl -fsS -o /dev/null http://127.0.0.1:8080/ui/
+          docker exec hush hush-hush backup --out - > /dev/null
+      - name: Logs on failure
+        if: failure()
+        run: docker logs hush || true
+
   govulncheck:
     # Always run against the latest stable Go to evaluate stdlib CVEs.
     # If we used go.mod here, a dep that rewrites "go 1.25" to "go 1.25.0"

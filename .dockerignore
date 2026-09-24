@@ -1,0 +1,14 @@
+# Only what `go build .` needs goes into the build context.
+.git
+.github
+.claude
+**/*.db
+**/*.db-wal
+**/*.db-shm
+master_key
+*.md
+docs
+cmd
+coverage.out
+Dockerfile
+compose.yaml

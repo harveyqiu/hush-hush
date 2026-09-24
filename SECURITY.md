@@ -29,13 +29,13 @@ This is an active personal project; only the latest commit on `main` is supporte
 
 This is a deliberately minimal self-hosted tool for one operator and a handful of agents. The following are documented trade-offs in the [threat model](README.md#threat-model), not vulnerabilities:
 
-- **Server-side encryption**: the master key is loaded into the server process (systemd credential or env var); host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise.
+- **Server-side encryption**: the master key is loaded into the server process (Docker secret file or env var); host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise.
 - **Agents see plaintext values**: an agent token can read the values under its prefixes. Access control limits *which* secrets an agent gets, not what it does with them.
-- **Same-user bypass**: any process running as the `hush` user (or root) can read the database and master key directly, skipping tokens, prefixes and the audit log. Agents must run as different Linux users; see [`deploy/README.md`](deploy/README.md).
+- **Docker-level bypass**: anyone with access to the Docker daemon, the data volume plus the key file, or host root can read everything directly, skipping tokens, prefixes and the audit log. Agents must not have Docker access; see [`docs/docker.md`](docs/docker.md).
 - **Agent-created secrets**: an agent with write prefixes can create new names there (never overwrite or delete). Anything that reads that namespace should treat those values as agent-supplied.
 - **In-memory rate limits** reset on restart.
-- **Audit `remote_addr` is advisory** for callers on the same host when `TRUST_PROXY_HEADERS=true`, since a local process can talk to the loopback listener and set its own `X-Forwarded-For`.
-- **No token management over HTTP**: tokens are created and revoked only through the local `hush-hush token` CLI, by design.
+- **Audit `remote_addr` is advisory** for callers on the same host: with `TRUSTED_PROXIES` covering the Docker gateway (the compose default), any local process that reaches the published port can set its own `X-Forwarded-For`.
+- **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; keep admin tokens with humans, give them expiries, and set `ADMIN_API=false` if you only manage tokens from the CLI. Every admin call is audited.
 
 If your use case requires any of those properties, please pick a different tool — see the [README's "What this isn't" section](README.md#what-this-isnt).
 
