@@ -6,18 +6,20 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cjunks94/hush-hush)](go.mod)
 [![License: MIT](https://img.shields.io/github/license/cjunks94/hush-hush)](LICENSE)
 
-A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest. Deploys to Railway in five minutes, runs anywhere a Go binary can run.
+A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest, per-agent tokens with read scopes and an audit log. Made to run on a small Linux VPS under systemd behind Caddy; still runs anywhere a Go binary can run.
 
-Built as a personal portfolio project — small enough to read in one sitting (~1.8k lines + tests), real enough to actually use.
+Built as a personal portfolio project — small enough to read in one sitting (~3k lines + tests), real enough to actually use.
 
 ## What this is
 
-A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets across personal projects. You `PUT` a value, you `GET` it back. That's the entire feature set.
+A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets across personal projects. You `PUT` a value, you `GET` it back.
+
+It is built for one human and a handful of automated agents (LLM tools, CI jobs, scripts) on one host. You hold an admin token; each agent gets its own read-only token limited to the name prefixes it needs, and every access is logged.
 
 ## What this isn't
 
 - A team password manager (use [Vaultwarden](https://github.com/dani-garcia/vaultwarden))
-- A Vault replacement (no policies, no rotation, no PKI)
+- A Vault replacement (no policy language, no dynamic secrets, no PKI)
 - Audited or compliant storage for customer data
 
 ## Threat model
@@ -26,10 +28,10 @@ Two encryption modes, intentionally layered. **v1 is the default**; v2 is opt-in
 
 ### v1 — server-side AES-256-GCM (always on)
 
-The master key is provided as an environment variable to the running process. AAD binds both the secret name and a version byte into the AEAD tag.
+The master key is handed to the running process as a systemd credential file (or, for compatibility, the `MASTER_KEY` environment variable). AAD binds both the secret name and a version byte into the AEAD tag.
 
 **Protects against:** stolen DB backups, leaked volume snapshots.
-**Does not protect against:** host compromise — if an attacker gets shell on the running container, key and ciphertext are both there.
+**Does not protect against:** host compromise — if an attacker gets a shell as the service user or root, key and ciphertext are both there. Same reason agents must run as a different Linux user than the server; see the [deployment guide](deploy/README.md#1-threat-model-in-one-page).
 
 ### v2 — client-side XChaCha20-Poly1305 (opt-in via `hush init`)
 
@@ -42,101 +44,94 @@ When a user runs `hush init`, the CLI creates a local vault file (`~/.config/hus
 
 The design decisions behind v2 — KDF choice, AEAD choice, wire format, why no server-side automation — are recorded in [`docs/adr/0001-client-side-encryption.md`](docs/adr/0001-client-side-encryption.md).
 
-**Single-user.** A single bearer token guards all routes. No users, no ACLs, no audit log.
+### Access control
+
+**One owner, many agents.** Every caller has its own bearer token. Admin tokens read and write everything; agent tokens are read-only and limited to name prefixes. Tokens are stored as SHA-256 hashes and checked against the database on every request, so revocation takes effect immediately. Every `/v1/secrets` request lands in an audit log (names and outcomes, never values). None of this stops someone who can read the database file and master key directly, which is why the server runs as its own Linux user. Details in [Multi-agent access](#multi-agent-access).
 
 ## Architecture
 
 ```
-client                 Railway edge (Fastly + TLS)
-  │                              │
-  └──── HTTPS ─────────────►     │
-                                 ▼
-                        ┌──────────────────────┐
-                        │  Go HTTP server      │
-                        │  (single binary)     │
-                        └──────────┬───────────┘
-                                   ▼
-                        ┌──────────────────────┐
-                        │  SQLite + WAL        │
-                        │  (Railway Volume)    │
-                        └──────────────────────┘
+agents / you               Linux VPS
+  │           ┌─────────────────────────────────────────┐
+  └── HTTPS ─►│ Caddy (TLS, automatic certificates)     │
+              │   │  reverse_proxy 127.0.0.1:8080       │
+              │   ▼                                     │
+              │ hush-hush serve  (systemd, user `hush`) │
+              │   │                                     │
+              │   ▼                                     │
+              │ SQLite + WAL   /var/lib/hush  (0700)    │
+              │ master key     systemd credential       │
+              └─────────────────────────────────────────┘
 ```
 
-- TLS terminated at Railway's edge; Go process speaks HTTP internally.
+- TLS terminated by Caddy on the same host; the Go process listens on loopback only (`127.0.0.1:8080` by default) and speaks plain HTTP.
 - AES-256-GCM with `(version_byte || name)` bound as AAD — defeats algorithm-downgrade and cross-name ciphertext rebinding.
 - Random 12-byte nonce per write. Ciphertext stored as `version_byte || sealed_payload`.
-- Bearer-token auth via SHA-256-then-`subtle.ConstantTimeCompare` (no length oracle).
-- SQLite via `modernc.org/sqlite` — pure Go, no CGO, works with any Go buildpack out of the box.
+- Per-caller bearer tokens (`hush_` + 64 hex chars), stored only as SHA-256, looked up by hash and re-compared with `subtle.ConstantTimeCompare` (no length oracle).
+- Token and audit administration (`hush-hush token ...`, `hush-hush audit`) works directly on the database file. There is no management API to attack over the network.
+- SQLite via `modernc.org/sqlite` — pure Go, no CGO, static binary. Schema migrations run automatically on startup.
 - Structured logging via `log/slog` with a request-ID middleware that honors valid inbound `X-Request-ID` for end-to-end correlation.
 
-## Deploy on Railway in five minutes
+## Deploy
 
-### 1. Generate `MASTER_KEY` and `AUTH_TOKEN`
+**The supported path is a Linux VPS with systemd and Caddy: follow [`deploy/README.md`](deploy/README.md).** It covers the threat model, first install, token management, backups, upgrades and day-to-day operation, and ships a hardened [systemd unit](deploy/hush-hush.service) and a [Caddyfile](deploy/Caddyfile).
 
-**PowerShell (Windows):**
-```powershell
-$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-$bytes = New-Object byte[] 32; $rng.GetBytes($bytes)
-"MASTER_KEY: " + [Convert]::ToBase64String($bytes)
-$rng.GetBytes($bytes)
-"AUTH_TOKEN: " + (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
-```
-
-**bash / zsh (macOS / Linux / Git Bash):**
-```bash
-openssl rand -base64 32   # MASTER_KEY  (32 bytes, base64-encoded)
-openssl rand -hex 32      # AUTH_TOKEN  (64 hex chars)
-```
-
-**Back up the `MASTER_KEY` somewhere safe** (1Password, paper, whatever). Lose it and every secret in the DB is unrecoverable — the DB itself is just ciphertext, useless without the key.
-
-### 2. Create the Railway service
-
-Point a new Railway service at your fork of this repo. Railway's Nixpacks Go buildpack handles the build — no Dockerfile needed.
-
-### 3. Attach a Volume at `/data`
-
-1 GB is plenty (secrets are tiny).
-
-### 4. Set environment variables
-
-```
-MASTER_KEY=<base64 string from step 1>
-AUTH_TOKEN=<hex string from step 1>
-DB_PATH=/data/hush.db
-```
-
-`PORT` is auto-injected by Railway — don't set it manually.
-
-### 5. Verify
+The short version, from a checkout of this repo:
 
 ```bash
-curl https://<your-app>.up.railway.app/healthz
-# → {"status":"ok"}
+sudo useradd --system --home /var/lib/hush --shell /usr/sbin/nologin hush
+CGO_ENABLED=0 go build -trimpath -o hush-hush .
+sudo install -o root -g root -m 0755 hush-hush /usr/local/bin/hush-hush
+sudo install -d -o root -g root -m 0700 /etc/hush
+sudo sh -c 'umask 077; openssl rand -base64 32 | tr -d "\n" > /etc/hush/master_key'
+sudo install -m 0644 deploy/hush-hush.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hush-hush
+curl -fsS http://127.0.0.1:8080/healthz   # server is up and has created the DB
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name admin-laptop --role admin
 ```
+
+**Back up the master key somewhere offline** (password manager, paper). Lose it and every secret in the DB is unrecoverable, since the DB itself is just ciphertext. Keep it apart from your DB backups.
+
+### Railway (compatibility only)
+
+v0.1.0 was Railway-first and still runs there, but you lose the Linux-user separation the multi-agent model relies on, and there's no systemd credential for the key. Existing deployments keep working after two changes; new deployments should use the VPS path.
+
+- The server now listens on `127.0.0.1` by default, which Railway's router can't reach, and `PORT` alone now means `127.0.0.1:$PORT`. Set `LISTEN_ADDR=0.0.0.0:8080` and also set `PORT=8080` explicitly so Railway routes to the same port.
+- `AUTH_TOKEN` is deprecated. It still works as an admin token (named `env:AUTH_TOKEN` in the audit log). Named tokens need `hush-hush token create` run against the volume's DB file as its owner, which is awkward on Railway; the practical options are to keep `AUTH_TOKEN` or to create tokens on a downloaded copy of the DB and upload it back. Leave `TRUST_PROXY_HEADERS` unset: Railway's proxy isn't on loopback, so it would have no effect.
+
+```
+MASTER_KEY=<openssl rand -base64 32>
+AUTH_TOKEN=<openssl rand -hex 32>        # deprecated, see above
+DB_PATH=/data/hush.db                    # Railway Volume mounted at /data
+LISTEN_ADDR=0.0.0.0:8080
+PORT=8080
+```
+
+Verify with `curl https://<your-app>.up.railway.app/healthz` → `{"status":"ok"}`.
 
 ## API
 
-All routes except `/healthz` require `Authorization: Bearer <AUTH_TOKEN>`. All responses are JSON; all carry `Cache-Control: no-store` and `X-Request-ID`.
+All routes except `/healthz` require `Authorization: Bearer <token>`, with a token from `hush-hush token create`. What a token may do depends on its role; see [Multi-agent access](#multi-agent-access). All responses are JSON; all carry `Cache-Control: no-store` and `X-Request-ID`.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | `GET` | `/healthz` | — | `{"status":"ok"}` |
-| `GET` | `/v1/secrets` | — | `{"secrets":[{name, created_at, updated_at}, ...]}` (values omitted; capped at 1000 entries) |
+| `GET` | `/v1/secrets` | — | `{"secrets":[{name, created_at, updated_at}, ...]}` (values omitted; capped at 1000 entries; agents only see names in scope) |
 | `GET` | `/v1/secrets/{name}` | — | `{name, value, created_at, updated_at}` |
-| `PUT` | `/v1/secrets/{name}` | `{"value":"..."}` | `{name, created_at, updated_at}` |
-| `DELETE` | `/v1/secrets/{name}` | — | `204` (idempotent — repeat calls and missing names also return 204) |
+| `PUT` | `/v1/secrets/{name}` | `{"value":"..."}` | `{name, created_at, updated_at}` (admin only) |
+| `DELETE` | `/v1/secrets/{name}` | — | `204` (admin only; idempotent — repeat calls and missing names also return 204) |
 
 **Constraints:**
 - Name: `^[a-zA-Z0-9_.-]{1,128}$` — no slashes or spaces. Use dots or underscores for hierarchy: `AWS_PROD.db.password`.
 - Value: opaque string, max 64 KiB.
 - `PUT` requires `Content-Type: application/json` (415 otherwise). Strict JSON parsing rejects unknown fields and trailing data.
+- Auth errors: `401 {"error":"unauthorized"}` for a missing, unknown, revoked or expired token; `403 {"error":"forbidden"}` when the token's role or scope doesn't allow the request; `429 {"error":"rate_limited"}` with `Retry-After` when over the rate limit.
 
 ### Examples
 
 ```bash
-URL=https://<your-app>.up.railway.app
-TOKEN=<your AUTH_TOKEN>
+URL=https://secrets.example.com
+TOKEN='hush_<64 hex>'   # an admin token
 
 # Store a secret
 curl -X PUT $URL/v1/secrets/openai-key \
@@ -157,6 +152,47 @@ curl -X DELETE $URL/v1/secrets/openai-key \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## Multi-agent access
+
+### Roles
+
+| Role | Read | Write / delete | Scope |
+|---|---|---|---|
+| `admin` | yes | yes | every secret |
+| `agent` | yes | never | only names starting with one of its prefixes |
+
+Prefixes must end in `.` or `_`, so `llm.` matches `llm.openai` but not `llmx.key`. A lone `*` prefix gives an agent read access to everything, including secrets added later; the CLI makes you retype the token name to confirm it. Name secrets hierarchically (`llm.openai`, `github.deploy_key`) and scoping falls out naturally.
+
+### What callers see
+
+| Situation | Response |
+|---|---|
+| Missing, unknown, revoked or expired token | `401 {"error":"unauthorized"}` |
+| Agent `PUT` or `DELETE` | `403 {"error":"forbidden"}` |
+| Agent `GET` outside its prefixes, whether or not the name exists | `403 {"error":"forbidden"}` |
+| In scope but not stored | `404 {"error":"not found"}` |
+| Over the rate limit (default 60/min per token; 10/min per IP for failed auth) | `429 {"error":"rate_limited"}` + `Retry-After` |
+| Agent `GET /v1/secrets` | `200`, filtered to its scope |
+
+Every `/v1/secrets` request writes one `audit_log` row: time, token name, action, secret name, result, request ID and client IP. Never values, never tokens. If that row can't be written, reads fail closed with 500.
+
+### Admin commands
+
+These run on the server and open the database file directly. They must run as the user that owns the DB (they refuse otherwise) and won't create a missing DB, so start the service once first. `sudo` drops the environment, so pass `DB_PATH` (or `--db PATH`):
+
+```bash
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name admin-laptop --role admin
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name llm-agent --role agent --prefix llm. --prefix github. --expires 90d
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token list
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token update --name llm-agent --prefix llm.
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token revoke --name llm-agent
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush audit --token llm-agent --result denied --since 7d
+```
+
+`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first and filters on `--token`, `--secret`, `--action get|list|put|delete`, `--result allowed|denied|not_found|unauthenticated|rate_limited|bad_request|error`, `--since` / `--until` (`7d`, `24h` or RFC3339) and `--limit` (default 100).
+
+Rotation, backups, audit pruning and moving off `AUTH_TOKEN` are covered in [`deploy/README.md`](deploy/README.md).
+
 ## CLI
 
 A thin client lives in [`cmd/hush`](cmd/hush). Install:
@@ -168,7 +204,7 @@ go install github.com/cjunks94/hush-hush/cmd/hush@latest
 Configure once, then forget the URL and token exist:
 
 ```bash
-hush login --url https://<your-app>.up.railway.app --token <AUTH_TOKEN>
+hush login --url https://secrets.example.com --token 'hush_<64 hex>'
 # writes ~/.config/hush/config.json (mode 0600)
 
 hush health
@@ -197,6 +233,8 @@ hush list --json                      # machine-readable
 # Delete
 hush delete openai-key                # idempotent
 ```
+
+The CLI works with any token. With an agent token, `hush list` shows only in-scope names, and `hush put` / `hush delete` get a 403.
 
 **Config precedence:** `--url`/`--token` flag > `HUSH_URL`/`HUSH_TOKEN` env > config file. Useful for one-off invocations against a non-default server without re-running `login`.
 
@@ -235,13 +273,15 @@ hush migrate
 ## Local development
 
 ```bash
-# Generate keys for local use
+# Generate a key for local use
 export MASTER_KEY=$(openssl rand -base64 32)
-export AUTH_TOKEN=$(openssl rand -hex 32)
 export DB_PATH=./hush.db
 
-# Run
+# Run the server (listens on 127.0.0.1:8080)
 go run .
+
+# In another shell, same DB_PATH: create a token
+go run . token create --name dev --role admin
 
 # Test
 go test ./...
@@ -271,9 +311,9 @@ Tool versions are pinned to specific tags / commit SHAs to defeat `@latest` supp
 - **Client-side encryption requires CLI consumers.** v2 (`hush init` + `hush migrate`) protects against host compromise, but raw-HTTP consumers can't decrypt `hh2:` values. Either every consumer uses the CLI / vendors the vault code, or v2 stays off for that deployment. See [`docs/adr/0001-client-side-encryption.md`](docs/adr/0001-client-side-encryption.md) for the full design discussion.
 - **No passphrase caching.** v2 prompts every command. OS keychain integration (`--remember` flag) is plausible future work, deferred for now to keep the trust surface minimal.
 - **No key-rotation tooling.** If the v1 master key leaks, recovery is manual: rotate, decrypt all rows under old key, re-encrypt under new key, swap env var. If the v2 passphrase leaks: change passphrase via re-init + manual re-puts (no automated re-key yet).
-- **No rate limiting** beyond Railway's edge default.
-- **No audit log** of who-read-what.
-- **No multi-user.**
+- **One owner, not a team tool.** Two roles only (admin, read-only agent). No per-human accounts, no groups, no agents that can write.
+- **Rate limits live in memory** and reset on restart. Fine for one process on one host.
+- **The audit log grows without bound** and has no built-in retention; prune it by hand (see [operational notes](deploy/README.md#9-operational-notes)). It only sees API access: anyone who can read the DB file directly bypasses it.
 - **No web UI / browser extension.**
 
 If you need any of these, [Vaultwarden](https://github.com/dani-garcia/vaultwarden) and [Infisical](https://github.com/Infisical/infisical) are good self-hosted alternatives.

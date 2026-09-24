@@ -1,0 +1,39 @@
+# Caddy reverse proxy for hush-hush.
+#
+# Install: add this site block to /etc/caddy/Caddyfile (or import this file),
+# replace secrets.example.com with your domain, then:
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Caddy obtains and renews a Let's Encrypt / ZeroSSL certificate
+# automatically. Requirements: the domain's A/AAAA record points at this host
+# and ports 80 and 443 are reachable from the internet (80 is used for the
+# ACME challenge and redirects to HTTPS).
+#
+# Logging: Caddy writes no access log unless you add a `log` directive. If you
+# do add one, Caddy redacts the Authorization header by default; do NOT enable
+# the global `servers { log_credentials }` option, or bearer tokens will end up
+# in the log file.
+
+secrets.example.com {
+	# Largest legitimate request is a PUT with a 64 KiB value plus JSON
+	# framing. Reject anything bigger before it reaches the Go process.
+	request_body {
+		max_size 80KB
+	}
+
+	# Optional hardening headers. The API only returns JSON, so these are
+	# belt and braces rather than essential.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# hush-hush listens on loopback only (LISTEN_ADDR=127.0.0.1:8080).
+	# Caddy replaces any client-supplied X-Forwarded-For with the real peer
+	# address (clients are untrusted by default), and hush-hush, started with
+	# TRUST_PROXY_HEADERS=true, reads the rightmost entry as the client IP.
+	reverse_proxy 127.0.0.1:8080
+}
