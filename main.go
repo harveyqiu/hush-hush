@@ -59,7 +59,9 @@ type secretRow struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-func main() {
+// serve runs the HTTP API until SIGINT/SIGTERM. It is the default when the
+// binary is started without a subcommand, preserving v0.1.0 behaviour.
+func serve() {
 	// JSON to stdout — Railway's log viewer parses it; jq-friendly locally.
 	// contextHandler picks up request_id from r.Context() so handlers don't
 	// have to thread it manually.
@@ -209,7 +211,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 			conds[i] = `substr(name, 1, ?) = ?`
 			args = append(args, len(pre), pre)
 		}
-		query += ` WHERE ` + strings.Join(conds, ` OR `)
+		query += ` WHERE ` + strings.Join(conds, ` OR `) // #nosec G202 -- joins constant placeholders only; values are bound as args
 	}
 	query += ` ORDER BY name LIMIT ?`
 	args = append(args, listLimit)

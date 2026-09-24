@@ -336,3 +336,7 @@ func decodeJSON(t *testing.T, b []byte, v any) {
 		t.Fatalf("decode %q: %v", b, err)
 	}
 }
+
+// run() replaces the default logger for admin commands; tests put it back.
+func captureLogsPrev() *slog.Logger { return slog.Default() }
+func restoreLogs(l *slog.Logger)    { slog.SetDefault(l) }
