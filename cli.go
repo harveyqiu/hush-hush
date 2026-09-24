@@ -28,6 +28,9 @@ Usage:
   hush-hush token list
   hush-hush token revoke --name N
   hush-hush token update --name N --prefix llm. [--prefix ...]
+  hush-hush audit [--token N] [--secret N] [--action get|list|put|delete] [--result R]
+                  [--since T] [--until T] [--limit 100]
+                                    T is RFC3339 (2026-09-01T00:00:00Z) or an age (24h, 7d)
   hush-hush help
 
 Admin subcommands operate directly on the database file, not over HTTP.
@@ -62,6 +65,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "token":
 		err = cmdToken(args[1:], stdin, stdout, stderr)
+	case "audit":
+		err = cmdAudit(args[1:], stdout)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, cliUsage)
 		return 0
