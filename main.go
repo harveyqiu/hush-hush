@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -191,9 +192,29 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT name, created_at, updated_at FROM secrets ORDER BY name LIMIT ?`,
-		listLimit)
+	p := principalFrom(r.Context())
+	all, prefixes := p.grantedPrefixes()
+	if !all && len(prefixes) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"secrets": []secretRow{}})
+		return
+	}
+	// Agents get the prefix filter in SQL so LIMIT applies to what they
+	// may see. substr() rather than LIKE: '_' is a LIKE wildcard and is
+	// also a legal prefix separator.
+	query := `SELECT name, created_at, updated_at FROM secrets`
+	var args []any
+	if !all {
+		conds := make([]string, len(prefixes))
+		for i, pre := range prefixes {
+			conds[i] = `substr(name, 1, ?) = ?`
+			args = append(args, len(pre), pre)
+		}
+		query += ` WHERE ` + strings.Join(conds, ` OR `)
+	}
+	query += ` ORDER BY name LIMIT ?`
+	args = append(args, listLimit)
+
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list query failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "db error")
@@ -209,6 +230,10 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "db error")
 			return
 		}
+		// Belt and braces: the SQL filter should already guarantee this.
+		if !p.canRead(sr.Name) {
+			continue
+		}
 		out = append(out, sr)
 	}
 	if err := rows.Err(); err != nil {
@@ -223,6 +248,12 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !nameRe.MatchString(name) {
 		writeErr(w, http.StatusBadRequest, "invalid name")
+		return
+	}
+	// Checked before the lookup so an agent gets 403 for every name outside
+	// its grant, existing or not; 404 would let it probe for names.
+	if !principalFrom(r.Context()).canRead(name) {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	var ct, nonce []byte

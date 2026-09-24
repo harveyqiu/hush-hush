@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -158,4 +159,83 @@ func requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// allSecrets is the wildcard grant. It must be the only prefix on a token
+// and the CLI makes the operator confirm it explicitly.
+const allSecrets = "*"
+
+// prefixRe: name characters, at least one before the trailing separator,
+// and a mandatory trailing '.' or '_'. The separator is what stops "llm."
+// from matching "llmx.key".
+var prefixRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,127}[._]$`)
+
+// validatePrefixes enforces the grant rules for a role. Admin tokens carry
+// no prefixes (they can read everything by role); agent tokens need at
+// least one, and "*" cannot be mixed with others.
+func validatePrefixes(role string, prefixes []string) error {
+	switch role {
+	case roleAdmin:
+		if len(prefixes) > 0 {
+			return errors.New("admin tokens do not take --prefix (they can read everything)")
+		}
+		return nil
+	case roleAgent:
+	default:
+		return fmt.Errorf("role must be %q or %q", roleAdmin, roleAgent)
+	}
+	if len(prefixes) == 0 {
+		return errors.New("agent tokens need at least one --prefix")
+	}
+	seen := map[string]bool{}
+	for _, p := range prefixes {
+		if p == allSecrets {
+			if len(prefixes) != 1 {
+				return errors.New(`"*" must be the only prefix`)
+			}
+			continue
+		}
+		if !prefixRe.MatchString(p) {
+			return fmt.Errorf("invalid prefix %q: must be name characters ending in '.' or '_' (e.g. llm.)", p)
+		}
+		if seen[p] {
+			return fmt.Errorf("duplicate prefix %q", p)
+		}
+		seen[p] = true
+	}
+	return nil
+}
+
+// grantedPrefixes returns the agent's usable prefixes. Stored prefixes are
+// re-validated on every use so a hand-edited row (say, an empty string,
+// which would prefix-match everything) can never widen access.
+func (p *principal) grantedPrefixes() (all bool, prefixes []string) {
+	if p.role == roleAdmin {
+		return true, nil
+	}
+	if len(p.prefixes) == 1 && p.prefixes[0] == allSecrets {
+		return true, nil
+	}
+	for _, pre := range p.prefixes {
+		if prefixRe.MatchString(pre) {
+			prefixes = append(prefixes, pre)
+		}
+	}
+	return false, prefixes
+}
+
+// canRead reports whether p may read the secret called name. It does not
+// touch the database, so an out-of-scope name gets 403 whether or not it
+// exists.
+func (p *principal) canRead(name string) bool {
+	all, prefixes := p.grantedPrefixes()
+	if all {
+		return true
+	}
+	for _, pre := range prefixes {
+		if strings.HasPrefix(name, pre) {
+			return true
+		}
+	}
+	return false
 }
