@@ -65,7 +65,69 @@ token 只打印这一次。把它存进密码管理器。
 
 ### 2.5 配置反向代理
 
-把 HTTPS 流量转发到 `127.0.0.1:8080`。以 Caddy 为例：
+两种接法，任选其一。
+
+#### 方式 A：Traefik（容器方式，推荐）
+
+Traefik 通过 Docker 网络直接访问 hush 容器，不需要在宿主机上开端口。仓库里的 `compose.traefik.yaml` 是一个叠加文件，作用如下：
+
+- 去掉宿主机端口映射；
+- 把 hush 接入 Traefik 所在的网络，并加上路由标签；
+- `/v1/secrets` 和 `/healthz` 对外开放，agent 从哪里都能访问；每次调用仍然要带 token；
+- `/ui`、`/v1/admin` 和根路径 `/` 只允许 `HUSH_ADMIN_ALLOW` 里列出的地址访问，其他来源由 Traefik 直接返回 403，请求到不了 hush。
+
+**前提**：
+- Traefik v3，启用 Docker provider，且 `exposedByDefault=false`；
+- 有一个 `websecure` 入口和一个证书解析器，名字可在 `.env` 里改；
+- **Traefik 版本 ≥ v3.6**。Docker 29 要求客户端的 Docker API 版本至少为 1.40，更早的 Traefik 连不上 Docker，读不到容器标签。日志里会出现 `client version 1.24 is too old`。
+
+**步骤**：
+
+1. 固定 Traefik 在共享网络上的 IP，只有这个地址会被信任设置 `X-Forwarded-For`。在 Traefik 自己的 compose 里：
+
+   ```yaml
+   services:
+     traefik:
+       networks:
+         traefik:
+           ipv4_address: 172.30.0.2
+   networks:
+     traefik:
+       name: traefik
+       ipam:
+         config:
+           - subnet: 172.30.0.0/24
+   ```
+
+   如果不想固定 IP，也可以把 `TRAEFIK_TRUSTED` 设为整个网络的网段，例如 `172.30.0.0/24`。代价是：接在这个网络上的任何容器都能伪造来源 IP，影响范围是审计里的来源地址和按 IP 的失败鉴权限流，不影响 token 鉴权本身。
+
+2. 复制并编辑环境变量文件：
+
+   ```bash
+   cp .env.example .env
+   # 修改 HUSH_HOST、TRAEFIK_NETWORK、TRAEFIK_TRUSTED、HUSH_ADMIN_ALLOW；
+   # 入口和证书解析器名称如与默认不同也要改
+   ```
+
+   `.env` 里的 `COMPOSE_FILE=compose.yaml:compose.traefik.yaml` 会让之后所有 `docker compose ...` 命令自动带上 Traefik 配置。
+
+3. 启动：`docker compose up -d`。
+
+**验证**：
+
+```bash
+curl https://secrets.example.com/healthz          # {"status":"ok"}
+curl -o /dev/null -w '%{http_code}\n' https://secrets.example.com/ui/   # 白名单外应为 403
+docker compose exec hush hush-hush audit --limit 3                     # REMOTE 列应为真实客户端 IP，而不是 Traefik 的地址
+```
+
+**关于来源 IP**：Traefik 默认会丢弃客户端自己带来的 `X-Forwarded-For`，再写入它看到的真实地址，所以客户端无法伪造来源 IP。如果 Traefik 前面还有 CDN 或负载均衡，需要在 Traefik 的入口上配置 `forwardedHeaders.trustedIPs`，否则审计里记录的会是 CDN 的地址，白名单判断也会基于 CDN 的地址。
+
+Traefik v2 的中间件叫 `ipwhitelist`，不叫 `ipallowlist`。用 v2 的话，要改 `compose.traefik.yaml` 里对应的标签。
+
+#### 方式 B：宿主机上的反向代理（Caddy、nginx 等）
+
+使用默认的 `compose.yaml`，它会把服务发布在 `127.0.0.1:8080`，把 HTTPS 流量转发过去即可。以 Caddy 为例：
 
 ```
 secrets.example.com {
@@ -73,13 +135,13 @@ secrets.example.com {
 }
 ```
 
-nginx 需要 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`，Caddy 默认就会设置这个头。
+nginx 需要 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`，Caddy 默认就会设置这个头。建议同样在代理上限制 `/ui` 和 `/v1/admin` 的来源 IP。
 
-**来源 IP**：从宿主机进入容器的流量，源地址是 compose 网络的网关 `172.29.53.1`。`compose.yaml` 已设置 `TRUSTED_PROXIES: "172.29.53.1"`，只信任这个地址发来的 `X-Forwarded-For`。这样审计日志里记录的是真实客户端 IP，按 IP 的失败鉴权限流也按真实 IP 计算。如果 `172.29.53.0/24` 和你已有的网络冲突，要把 `compose.yaml` 里的子网和 `TRUSTED_PROXIES` 一起改掉。
+**来源 IP**：从宿主机进入容器的流量，源地址是 compose 网络的网关 `172.29.53.1`。`compose.yaml` 已经设置 `TRUSTED_PROXIES: "172.29.53.1"`，只信任这个地址发来的 `X-Forwarded-For`。如果 `172.29.53.0/24` 和你已有的网络冲突，要把 `compose.yaml` 里的子网和 `TRUSTED_PROXIES` 一起改掉。
 
 ### 2.6 登录管理界面
 
-打开 `https://secrets.example.com/ui/`，粘贴 admin token。
+打开 `https://secrets.example.com/ui/`（用 Traefik 时，要从 `HUSH_ADMIN_ALLOW` 列出的地址访问），粘贴 admin token。
 
 - token 只保存在当前浏览器标签页里，关闭标签页即失效；空闲 15 分钟会自动退出。
 - agent token 登录不了管理界面。

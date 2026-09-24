@@ -12,3 +12,6 @@ cmd
 coverage.out
 Dockerfile
 compose.yaml
+compose.traefik.yaml
+.env
+.env.*

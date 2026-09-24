@@ -86,6 +86,8 @@ docker compose exec hush hush-hush token create --name admin --role admin --expi
 
 Point your HTTPS reverse proxy at `127.0.0.1:8080`, open `https://<your-host>/ui/` and log in with the admin token.
 
+**Traefik:** `compose.traefik.yaml` is an overlay that drops the host port, attaches the container to Traefik's network with router labels, trusts only Traefik for `X-Forwarded-For`, and restricts `/ui` and `/v1/admin` to an IP allowlist while `/v1/secrets` stays reachable for agents. Copy `.env.example` to `.env`, fill it in, `docker compose up -d`. Needs Traefik ≥ v3.6 on Docker 29+. Details in [`docs/docker.md`](docs/docker.md).
+
 Without compose:
 
 ```bash
