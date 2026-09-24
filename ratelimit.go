@@ -108,12 +108,6 @@ func (l *rateLimiter) maybePrune(now time.Time) {
 	}
 }
 
-func (l *rateLimiter) size() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.buckets)
-}
-
 // writeRateLimited emits the 429. Retry-After is whole seconds rounded up
 // and never 0, so a client honouring it can't retry into the same wall.
 func writeRateLimited(w http.ResponseWriter, wait time.Duration) {

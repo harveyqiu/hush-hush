@@ -1,0 +1,59 @@
+# hush-hush as a single container.
+#
+#   1. Create the master key (once; back it up offline, separately from the data):
+#        openssl rand -base64 32 > master_key
+#        sudo chown 65532:65532 master_key && sudo chmod 400 master_key
+#   2. docker compose up -d
+#   3. docker compose exec hush hush-hush token create --name admin --role admin --expires 30d
+#   4. Put your HTTPS reverse proxy in front of 127.0.0.1:8080, then open /ui/.
+#
+# Full guide: docs/docker.md
+
+services:
+  hush:
+    build: .
+    image: hush-hush:latest
+    restart: unless-stopped
+    # Published on the host's loopback only; your reverse proxy terminates TLS.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      MASTER_KEY_FILE: /run/secrets/master_key
+      # Traffic from the host (your reverse proxy) arrives from the network
+      # gateway, so without this every client would look like 172.29.53.1
+      # in the audit log and share one failed-auth rate-limit bucket. Only
+      # the gateway is trusted to set X-Forwarded-For; since the port is
+      # published on 127.0.0.1, that is only processes on this host.
+      # Keep it in sync with the subnet below.
+      TRUSTED_PROXIES: "172.29.53.1"
+      # ADMIN_API: "false"   # disables /v1/admin and the web UI
+    secrets:
+      - master_key
+    volumes:
+      - hush-data:/data
+    networks:
+      - hush
+    # Hardening: nothing in the image needs to write outside /data.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  master_key:
+    file: ./master_key
+
+volumes:
+  hush-data:
+
+networks:
+  hush:
+    # Fixed so TRUSTED_PROXIES above can name the gateway. Change both if
+    # this range collides with a network you already use.
+    ipam:
+      config:
+        - subnet: 172.29.53.0/24
+          gateway: 172.29.53.1

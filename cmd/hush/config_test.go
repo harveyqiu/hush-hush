@@ -71,7 +71,7 @@ func TestResolveConfig_Precedence(t *testing.T) {
 			t.Setenv("HUSH_TOKEN", tt.envToken)
 
 			if tt.file != nil {
-				if err := saveConfigFile(*tt.file); err != nil {
+				if _, err := saveConfigFile(*tt.file); err != nil {
 					t.Fatalf("save config: %v", err)
 				}
 			}
@@ -95,7 +95,7 @@ func TestSaveConfigFile_PermsAndRoundTrip(t *testing.T) {
 	t.Setenv("HUSH_CONFIG_DIR", dir)
 
 	cfg := Config{URL: "https://example", Token: "tok-123"}
-	if err := saveConfigFile(cfg); err != nil {
+	if _, err := saveConfigFile(cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 

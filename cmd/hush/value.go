@@ -106,13 +106,17 @@ func trimOneTrailingNewline(s string) string {
 	return s
 }
 
+// readPassword is term.ReadPassword; tests swap it to drive promptNoEcho
+// without a terminal.
+var readPassword = term.ReadPassword
+
 // promptNoEcho reads a secret from the terminal without echoing it. Used
 // when the user runs `hush put NAME` interactively with no other value
 // source supplied.
 func promptNoEcho(prompt string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	fmt.Fprint(os.Stderr, prompt)
-	b, err := term.ReadPassword(fd)
+	b, err := readPassword(fd)
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("read terminal: %w", err)

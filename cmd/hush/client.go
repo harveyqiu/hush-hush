@@ -157,10 +157,7 @@ func (c *client) Put(ctx context.Context, name, value string) (PutResult, error)
 	if !nameRe.MatchString(name) {
 		return pr, fmt.Errorf("invalid name %q (must match %s)", name, nameRe)
 	}
-	body, err := json.Marshal(map[string]string{"value": value})
-	if err != nil {
-		return pr, err
-	}
+	body, _ := json.Marshal(map[string]string{"value": value}) // cannot fail
 	resp, err := c.do(ctx, http.MethodPut, "/v1/secrets/"+url.PathEscape(name), true, bytes.NewReader(body))
 	if err != nil {
 		return pr, err

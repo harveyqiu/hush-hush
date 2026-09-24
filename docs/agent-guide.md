@@ -1,6 +1,6 @@
 # Agent 接入指南
 
-本文面向调用 hush-hush 的程序和 LLM agent：怎么拿到 secret、每个状态码代表什么、出错时怎么处理。部署和管理 token 见 [`deploy/README.md`](../deploy/README.md)。
+本文面向调用 hush-hush 的程序和 LLM agent：怎么拿到 secret、每个状态码代表什么、出错时怎么处理。部署和管理 token 见 [`docker.md`](docker.md)。
 
 ## 1. 你需要的两样东西
 

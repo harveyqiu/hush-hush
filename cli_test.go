@@ -46,10 +46,7 @@ func serverOn(t *testing.T, path string) (*server, http.Handler) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	s, err := newServer(db, testKey(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newServer(db, testKey())
 	return s, s.routes()
 }
 
@@ -57,7 +54,7 @@ var tokenFormatRe = regexp.MustCompile(`^hush_[0-9a-f]{64}$`)
 
 func TestCLI_TokenCreate_AgentEndToEnd(t *testing.T) {
 	path := newTestDBFile(t)
-	admin := runCLI(t, "", "token", "create", "--db", path, "--name", "admin", "--role", "admin")
+	admin := runCLI(t, "", "token", "create", "--db", path, "--name", "admin", "--role", "admin", "--expires", "30d")
 	agent := runCLI(t, "", "token", "create", "--db", path, "--name", "agent-llm", "--role", "agent",
 		"--prefix", "llm.", "--prefix", "github.", "--expires", "90d")
 	for _, r := range []cliResult{admin, agent} {
@@ -109,23 +106,23 @@ func TestCLI_TokenCreate_AgentEndToEnd(t *testing.T) {
 
 func TestCLI_TokenCreate_Rejections(t *testing.T) {
 	path := newTestDBFile(t)
-	if r := runCLI(t, "", "token", "create", "--db", path, "--name", "dup", "--role", "admin"); r.code != 0 {
+	if r := runCLI(t, "", "token", "create", "--db", path, "--name", "dup", "--role", "admin", "--expires", "30d"); r.code != 0 {
 		t.Fatalf("setup create: %s", r.stderr)
 	}
 	cases := map[string][]string{
-		"prefix without separator": {"--name", "a1", "--role", "agent", "--prefix", "llm"},
-		"prefix ends with dash":    {"--name", "a2", "--role", "agent", "--prefix", "llm-"},
-		"one good one bad prefix":  {"--name", "a3", "--role", "agent", "--prefix", "llm.", "--prefix", "gh"},
-		"agent without prefix":     {"--name", "a4", "--role", "agent"},
-		"admin with prefix":        {"--name", "a5", "--role", "admin", "--prefix", "llm."},
-		"unknown role":             {"--name", "a6", "--role", "root"},
-		"missing role":             {"--name", "a7"},
-		"bad name":                 {"--name", "bad name", "--role", "admin"},
-		"reserved legacy name":     {"--name", legacyTokenName, "--role", "admin"},
-		"duplicate name":           {"--name", "dup", "--role", "admin"},
-		"bad expiry":               {"--name", "a8", "--role", "admin", "--expires", "soon"},
-		"negative expiry":          {"--name", "a9", "--role", "admin", "--expires", "-1d"},
-		"stray argument":           {"--name", "a10", "--role", "admin", "extra"},
+		"prefix without separator":   {"--name", "a1", "--role", "agent", "--prefix", "llm"},
+		"prefix ends with dash":      {"--name", "a2", "--role", "agent", "--prefix", "llm-"},
+		"one good one bad prefix":    {"--name", "a3", "--role", "agent", "--prefix", "llm.", "--prefix", "gh"},
+		"agent without prefix":       {"--name", "a4", "--role", "agent"},
+		"admin with prefix":          {"--name", "a5", "--role", "admin", "--prefix", "llm."},
+		"unknown role":               {"--name", "a6", "--role", "root"},
+		"missing role":               {"--name", "a7"},
+		"bad name":                   {"--name", "bad name", "--role", "admin"},
+		"colon not allowed in names": {"--name", "env:AUTH_TOKEN", "--role", "admin"},
+		"duplicate name":             {"--name", "dup", "--role", "admin", "--expires", "30d"},
+		"bad expiry":                 {"--name", "a8", "--role", "admin", "--expires", "soon"},
+		"negative expiry":            {"--name", "a9", "--role", "admin", "--expires", "-1d"},
+		"stray argument":             {"--name", "a10", "--role", "admin", "extra"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -166,7 +163,7 @@ func TestCLI_WildcardNeedsConfirmation(t *testing.T) {
 func TestCLI_TokenList(t *testing.T) {
 	path := newTestDBFile(t)
 	created := runCLI(t, "", "token", "create", "--db", path, "--name", "agent-llm", "--role", "agent", "--prefix", "llm.")
-	runCLI(t, "", "token", "create", "--db", path, "--name", "old", "--role", "admin")
+	runCLI(t, "", "token", "create", "--db", path, "--name", "old", "--role", "admin", "--expires", "30d")
 	runCLI(t, "", "token", "revoke", "--db", path, "--name", "old")
 
 	r := runCLI(t, "", "token", "list", "--db", path)
@@ -187,7 +184,7 @@ func TestCLI_TokenList(t *testing.T) {
 
 func TestCLI_RevokeIsImmediate(t *testing.T) {
 	path := newTestDBFile(t)
-	tok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "a", "--role", "admin").stdout)
+	tok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "a", "--role", "admin", "--expires", "30d").stdout)
 	_, h := serverOn(t, path)
 	if rr := do(h, reqWithToken("GET", "/v1/secrets", tok, nil)); rr.Code != http.StatusOK {
 		t.Fatalf("before revoke: %d", rr.Code)
@@ -209,7 +206,7 @@ func TestCLI_RevokeIsImmediate(t *testing.T) {
 
 func TestCLI_TokenUpdate(t *testing.T) {
 	path := newTestDBFile(t)
-	adminTok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "adm", "--role", "admin").stdout)
+	adminTok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "adm", "--role", "admin", "--expires", "30d").stdout)
 	agentTok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "ag", "--role", "agent", "--prefix", "llm.").stdout)
 	_, h := serverOn(t, path)
 	seed := func(name string) {

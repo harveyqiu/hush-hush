@@ -1,0 +1,105 @@
+:root {
+  --bg: #f7f7f5;
+  --fg: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #deded8;
+  --panel: #ffffff;
+  --accent: #2f5bd3;
+  --accent-fg: #ffffff;
+  --danger: #b3261e;
+  --ok: #1e7d3a;
+  --warn-bg: #fff6d6;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --fg: #ececea;
+    --muted: #9a9a94;
+    --line: #33332f;
+    --panel: #1f1f1d;
+    --accent: #7a9cff;
+    --accent-fg: #0b0b0a;
+    --danger: #ff8a80;
+    --ok: #7fd49a;
+    --warn-bg: #3a3218;
+  }
+}
+* { box-sizing: border-box; }
+/* Component display rules must never un-hide a [hidden] element. */
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 17px; margin: 0; }
+.muted { color: var(--muted); }
+.error { color: var(--danger); margin: 0; }
+.mono, code, td.mono { font-family: var(--mono); font-size: 13px; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+
+input, select, textarea, button {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--panel);
+}
+textarea { font-family: var(--mono); min-height: 140px; resize: vertical; }
+button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  cursor: pointer;
+}
+button.secondary { background: transparent; color: var(--fg); border-color: var(--line); }
+button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+button.link { background: none; border: none; color: var(--accent); padding: 2px 6px; }
+button.link.danger { color: var(--danger); }
+button:disabled { opacity: .5; cursor: default; }
+
+.login { max-width: 380px; margin: 12vh auto; padding: 0 16px; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.topbar nav { display: flex; gap: 4px; flex: 1; }
+.tab { background: transparent; color: var(--fg); border-color: transparent; }
+.tab.active { border-color: var(--line); background: var(--bg); }
+
+.banner { margin: 12px 16px 0; padding: 8px 12px; border-radius: 6px; background: var(--warn-bg); }
+.panel { padding: 12px 16px 32px; overflow-x: auto; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+.toolbar.wrap { flex-wrap: wrap; }
+.toolbar input[type=search] { flex: 1; max-width: 320px; }
+.toolbar input[type=number] { width: 90px; }
+
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 12px; }
+td.actions { white-space: nowrap; text-align: right; }
+tr.dim td { color: var(--muted); }
+.pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); }
+.pill.active, .pill.allowed { color: var(--ok); border-color: var(--ok); }
+.pill.revoked, .pill.expired, .pill.denied, .pill.unauthenticated, .pill.error { color: var(--danger); border-color: var(--danger); }
+
+dialog {
+  border: 1px solid var(--line); border-radius: 10px; padding: 18px;
+  width: min(560px, calc(100vw - 32px));
+  background: var(--panel); color: var(--fg);
+}
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+dialog label input, dialog label select, dialog label textarea { color: var(--fg); }
+.dialog-actions { display: flex; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; }
+.secret-box {
+  font-family: var(--mono); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px; word-break: break-all; white-space: pre-wrap;
+  max-height: 300px; overflow: auto;
+}
+.warn { background: var(--warn-bg); border-radius: 6px; padding: 8px 10px; margin: 0; }
