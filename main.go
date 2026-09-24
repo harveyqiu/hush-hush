@@ -7,7 +7,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -50,6 +49,13 @@ type server struct {
 	// is in use; it then authenticates as an admin.
 	legacyTokenHash *[32]byte
 	now             func() time.Time
+	// tokenLimiter is keyed by authenticated token name; ipLimiter by
+	// client IP and consumed only by requests that fail authentication.
+	tokenLimiter *rateLimiter
+	ipLimiter    *rateLimiter
+	// trustProxy makes clientIP honour X-Forwarded-For from a loopback
+	// peer (the co-located reverse proxy).
+	trustProxy bool
 }
 
 type secretRow struct {
@@ -69,18 +75,14 @@ func serve() {
 		Handler: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 	}))
 
-	keyB64 := mustEnv("MASTER_KEY")
-	token := os.Getenv("AUTH_TOKEN")
-	dbPath := getenv("DB_PATH", "./hush.db")
-	port := getenv("PORT", "8080")
-
-	key, err := base64.StdEncoding.DecodeString(keyB64)
+	cfg, err := loadConfig(os.Getenv, os.ReadFile)
 	if err != nil {
-		fatal("MASTER_KEY: invalid base64", "error", err)
+		fatal("invalid configuration", "error", err)
 	}
-	if len(key) != 32 {
-		fatal("MASTER_KEY: must decode to 32 bytes", "got", len(key))
+	for _, w := range cfg.warnings {
+		slog.Warn(w)
 	}
+	dbPath := cfg.dbPath
 
 	db, err := openDB(dbPath)
 	if err != nil {
@@ -89,18 +91,23 @@ func serve() {
 	defer db.Close()
 	checkDBPerms(dbPath)
 
-	s, err := newServer(db, key, token)
+	s, err := newServer(db, cfg.key, cfg.legacyToken)
 	if err != nil {
 		fatal("server init failed", "error", err)
 	}
+	// The cipher has its own expanded copy; drop ours.
+	clear(cfg.key)
+	s.tokenLimiter = newRateLimiter(cfg.rateLimitPerMinute)
+	s.ipLimiter = newRateLimiter(cfg.unauthRateLimitPerMinute)
+	s.trustProxy = cfg.trustProxy
 	if n, err := s.activeTokenCount(); err != nil {
 		fatal("token count failed", "error", err)
-	} else if n == 0 && token == "" {
+	} else if n == 0 && cfg.legacyToken == "" {
 		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
 	}
 
 	srv := &http.Server{
-		Addr:              ":" + port,
+		Addr:              cfg.listenAddr,
 		Handler:           withRequestID(s.routes()),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -112,7 +119,12 @@ func serve() {
 	defer stop()
 
 	go func() {
-		slog.Info("listening", "port", port, "db_path", dbPath)
+		// key_source says where the key came from; the key itself is
+		// never logged.
+		slog.Info("listening", "addr", cfg.listenAddr, "db_path", dbPath,
+			"key_source", cfg.keySource, "trust_proxy_headers", cfg.trustProxy,
+			"rate_limit_per_minute", cfg.rateLimitPerMinute,
+			"unauth_rate_limit_per_minute", cfg.unauthRateLimitPerMinute)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fatal("listen failed", "error", err)
 		}
@@ -141,7 +153,13 @@ func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &server{db: db, gcm: gcm, now: time.Now}
+	s := &server{
+		db:           db,
+		gcm:          gcm,
+		now:          time.Now,
+		tokenLimiter: newRateLimiter(defaultRateLimitPerMinute),
+		ipLimiter:    newRateLimiter(defaultUnauthRateLimitPerMinute),
+	}
 	if legacyToken != "" {
 		slog.Warn("AUTH_TOKEN is deprecated: it is accepted as an admin token but cannot be scoped or revoked individually; create named tokens with `token create` and unset AUTH_TOKEN")
 		h := hashToken(legacyToken)

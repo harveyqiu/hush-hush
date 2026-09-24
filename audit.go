@@ -104,7 +104,7 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 		e := auditEntry{
 			Action:     action,
 			RequestID:  requestIDFrom(ctx),
-			RemoteAddr: clientIP(r),
+			RemoteAddr: clientIP(r, s.trustProxy),
 		}
 		// Only well-formed names are recorded; anything else is logged as
 		// empty so arbitrary client bytes never land in the audit table.
@@ -116,13 +116,23 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 		p, err := s.authenticate(ctx, r)
 		switch {
 		case errors.Is(err, errUnauthenticated):
-			writeErr(buf, http.StatusUnauthorized, "unauthorized")
+			// Only failed authentications spend the per-IP budget, so a
+			// shared NAT or proxy can't lock out valid tokens behind it.
+			if ok, wait := s.ipLimiter.allow(ipBucketKey(e.RemoteAddr), s.now()); !ok {
+				writeRateLimited(buf, wait)
+			} else {
+				writeErr(buf, http.StatusUnauthorized, "unauthorized")
+			}
 		case err != nil:
 			slog.ErrorContext(ctx, "token lookup failed", "error", err)
 			writeErr(buf, http.StatusInternalServerError, "db error")
 		default:
 			e.TokenName = p.name
-			h(buf, r.WithContext(context.WithValue(ctx, principalKey{}, p)))
+			if ok, wait := s.tokenLimiter.allow(p.name, s.now()); !ok {
+				writeRateLimited(buf, wait)
+			} else {
+				h(buf, r.WithContext(context.WithValue(ctx, principalKey{}, p)))
+			}
 		}
 		if buf.status == 0 {
 			buf.status = http.StatusOK
@@ -152,15 +162,40 @@ func requestIDFrom(ctx context.Context) string {
 	return id
 }
 
-// clientIP returns the caller's IP without the port. RemoteAddr is always
-// set by net/http; the fallback keeps the column well-formed regardless.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP returns the caller's IP without the port, or "unknown". It is
+// the audit remote_addr and the key for the unauthenticated rate limit.
+//
+// With trustProxy, X-Forwarded-For is honoured only when the direct peer is
+// loopback, i.e. the co-located reverse proxy; from anyone else the header
+// is attacker-controlled and ignored. Only the rightmost entry is used:
+// Caddy appends the address it saw, and everything to its left came from
+// the client. If that entry is not a valid IP we fall back to the peer
+// rather than scanning further left into client-supplied values.
+func clientIP(r *http.Request, trustProxy bool) string {
+	peer := parseIP(r.RemoteAddr)
+	if trustProxy && peer != nil && peer.IsLoopback() {
+		if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
+			last := xff[len(xff)-1]
+			if i := strings.LastIndexByte(last, ','); i >= 0 {
+				last = last[i+1:]
+			}
+			if ip := net.ParseIP(strings.TrimSpace(last)); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	if peer == nil {
+		return "unknown"
+	}
+	return peer.String()
+}
+
+// parseIP accepts "host:port" or a bare IP. RemoteAddr is always set by
+// net/http; the bare form keeps odd test or proxy values well-formed.
+func parseIP(addr string) net.IP {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		host = r.RemoteAddr
+		host = addr
 	}
-	if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil {
-		return ip.String()
-	}
-	return "unknown"
+	return net.ParseIP(strings.TrimSpace(host))
 }
