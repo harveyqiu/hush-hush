@@ -29,6 +29,9 @@ Usage:
   hush-hush audit [--token N] [--secret N] [--action get|list|put|delete|other] [--result R]
                   [--since T] [--until T] [--limit 100]
                                     T is RFC3339 (2026-09-01T00:00:00Z) or an age (24h, 7d)
+  hush-hush backup --out FILE|-           Consistent copy of the live database (VACUUM INTO); - streams to stdout
+  hush-hush audit-prune --older-than 180d   Delete old audit rows
+  hush-hush healthcheck             Exit 0 if the local server answers /healthz (for Docker HEALTHCHECK)
   hush-hush help
 
 Admin subcommands operate directly on the database file, not over HTTP.
@@ -59,6 +62,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "token":
 		err = cmdToken(args[1:], stdin, stdout, stderr)
+	case "backup":
+		err = cmdBackup(args[1:], stdout, stderr)
+	case "audit-prune":
+		err = cmdAuditPrune(args[1:], stdout)
+	case "healthcheck":
+		err = cmdHealthcheck(args[1:], os.Getenv)
 	case "audit":
 		err = cmdAudit(args[1:], stdout)
 	case "help", "-h", "--help":
