@@ -19,9 +19,8 @@ import (
 // Test tokens are deliberately low-entropy so secret scanners don't flag
 // them as leaked credentials.
 const (
-	agentToken  = "hush_agent-token-for-tests"
-	otherToken  = "hush_other-token-for-tests"
-	legacyToken = "legacy-env-token-for-tests"
+	agentToken = "hush_agent-token-for-tests"
+	otherToken = "hush_other-token-for-tests"
 )
 
 func reqWithToken(method, path, token string, body []byte) *http.Request {
@@ -30,8 +29,15 @@ func reqWithToken(method, path, token string, body []byte) *http.Request {
 	return req
 }
 
+// mustInsertToken inserts spec directly. Admin tokens without an explicit
+// expiry get 30 days, since the server rejects admin tokens that never
+// expire.
 func mustInsertToken(t *testing.T, s *server, spec tokenSpec, plaintext string) {
 	t.Helper()
+	if spec.role == roleAdmin && spec.expiresAt == nil {
+		exp := time.Now().Add(30 * 24 * time.Hour)
+		spec.expiresAt = &exp
+	}
 	if err := insertToken(context.Background(), s.db, spec, plaintext, time.Now()); err != nil {
 		t.Fatalf("insert token %q: %v", spec.name, err)
 	}
@@ -185,46 +191,6 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-func TestLegacyAuthToken_ActsAsAdminWithWarning(t *testing.T) {
-	logs := captureLogs(t)
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	if err := migrate(db); err != nil {
-		t.Fatal(err)
-	}
-	s, err := newServer(db, testKey(), legacyToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := s.routes()
-
-	if !strings.Contains(logs.String(), "AUTH_TOKEN is deprecated") {
-		t.Errorf("expected a deprecation warning, logs: %s", logs.String())
-	}
-	if strings.Contains(logs.String(), legacyToken) {
-		t.Errorf("legacy token plaintext leaked into logs")
-	}
-
-	// Admin powers: write, read, delete.
-	if rr := do(h, reqWithToken("PUT", "/v1/secrets/legacy.test", legacyToken, []byte(`{"value":"v"}`))); rr.Code != http.StatusOK {
-		t.Fatalf("PUT with legacy token: got %d", rr.Code)
-	}
-	if rr := do(h, reqWithToken("GET", "/v1/secrets/legacy.test", legacyToken, nil)); rr.Code != http.StatusOK {
-		t.Fatalf("GET with legacy token: got %d", rr.Code)
-	}
-	if rr := do(h, reqWithToken("DELETE", "/v1/secrets/legacy.test", legacyToken, nil)); rr.Code != http.StatusNoContent {
-		t.Fatalf("DELETE with legacy token: got %d", rr.Code)
-	}
-	// And nothing else authenticates.
-	if rr := do(h, reqWithToken("GET", "/v1/secrets", "not-"+legacyToken, nil)); rr.Code != http.StatusUnauthorized {
-		t.Errorf("wrong token: got %d, want 401", rr.Code)
-	}
-}
-
 // v010Schema is the exact DDL from v0.1.0's initSchema.
 const v010Schema = `
 		CREATE TABLE IF NOT EXISTS secrets (
@@ -274,10 +240,7 @@ func TestMigrate_V010Database(t *testing.T) {
 		if version != len(migrations) {
 			t.Errorf("schema version = %d, want %d", version, len(migrations))
 		}
-		s, err := newServer(db, testKey(), "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := newServer(db, testKey())
 		if i == 0 {
 			mustInsertToken(t, s, tokenSpec{name: "admin", role: roleAdmin}, testToken)
 		}

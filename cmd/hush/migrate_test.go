@@ -62,10 +62,7 @@ func TestCmdMigrate_MixedV1V2_SkipsV2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	already, err := encryptWireFormat(key, []byte("already-encrypted"), []byte("v2name"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	already := encryptWireFormat(key, []byte("already-encrypted"), []byte("v2name"))
 	srv.gets["v2name"] = Secret{Name: "v2name", Value: already}
 	srv.gets["v1name"] = Secret{Name: "v1name", Value: "still-plaintext"}
 	srv.listResp = []Secret{{Name: "v1name"}, {Name: "v2name"}}

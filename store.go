@@ -53,7 +53,23 @@ var migrations = []string{
 	CREATE INDEX audit_log_ts     ON audit_log (ts);
 	CREATE INDEX audit_log_token  ON audit_log (token_name, ts);
 	CREATE INDEX audit_log_secret ON audit_log (secret_name, ts);`,
+
+	// 4: create-only write grants for agent tokens (JSON array, like
+	// prefixes). Existing tokens get none, so nothing gains write access
+	// by upgrading.
+	`ALTER TABLE tokens ADD COLUMN write_prefixes TEXT NOT NULL DEFAULT '[]';`,
+
+	// 5: admin tokens must expire within 90 days. Active admin tokens that
+	// never expire, or expire later than that, get 30 days from the
+	// upgrade to be rotated; shorter-lived ones are left alone.
+	`UPDATE tokens SET expires_at = unixepoch() + 30*86400
+	 WHERE role = 'admin' AND revoked_at IS NULL
+	   AND (expires_at IS NULL OR expires_at > unixepoch() + 90*86400);`,
 }
+
+// sqliteDriver is the database/sql driver openDB uses. Tests swap in a
+// wrapper that injects failures to exercise error paths.
+var sqliteDriver = "sqlite"
 
 // dbDSN is the connection string shared by the server and the admin CLI.
 // _txlock=immediate takes the write lock at BEGIN so two processes
@@ -69,7 +85,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err := ensureDBFile(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dbDSN(path))
+	db, err := sql.Open(sqliteDriver, dbDSN(path))
 	if err != nil {
 		return nil, err
 	}

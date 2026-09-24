@@ -29,7 +29,9 @@ const (
 	resultUnauthenticated = "unauthenticated"
 	resultRateLimited     = "rate_limited"
 	resultBadRequest      = "bad_request"
-	resultError           = "error"
+	// resultConflict: an agent tried to create a name that already exists.
+	resultConflict = "conflict"
+	resultError    = "error"
 )
 
 // auditEntry is one audit_log row. It never holds a secret value or a
@@ -48,6 +50,15 @@ type auditEntry struct {
 }
 
 type auditKey struct{}
+
+// setAuditTarget records the object a request acts on when it isn't in the
+// URL path (e.g. the name of a token being created from a JSON body). Only
+// well-formed names are kept, as for path names.
+func setAuditTarget(ctx context.Context, name string) {
+	if e, _ := ctx.Value(auditKey{}).(*auditEntry); e != nil && nameRe.MatchString(name) {
+		e.SecretName = name
+	}
+}
 
 // commitWithAudit inserts the request's "allowed" audit row inside tx and
 // commits, so a mutation and its record land atomically. Without an audit
@@ -98,6 +109,8 @@ func resultForStatus(status int) string {
 		return resultDenied
 	case status == http.StatusNotFound:
 		return resultNotFound
+	case status == http.StatusConflict:
+		return resultConflict
 	case status == http.StatusTooManyRequests:
 		return resultRateLimited
 	case status < 500:
@@ -147,15 +160,17 @@ func (b *bufferedResponse) flushTo(w http.ResponseWriter) {
 	_, _ = w.Write(b.body.Bytes())
 }
 
-// secretsRoute is the single entry point for every /v1/secrets request:
-// authentication, then the handler, then exactly one audit row.
+// secretsRoute is the single entry point for every API request under
+// /v1/secrets and /v1/admin: authentication, rate limit, the handler, then
+// exactly one audit row. For admin token routes the {name} path value (the
+// target token) is what lands in secret_name.
 func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		e := auditEntry{
 			Action:     action,
 			RequestID:  requestIDFrom(ctx),
-			RemoteAddr: clientIP(r, s.trustProxy),
+			RemoteAddr: clientIP(r, s.trustedProxies),
 		}
 		// Only well-formed names are recorded; anything else is logged as
 		// empty so arbitrary client bytes never land in the audit table.
@@ -200,7 +215,7 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 					"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
 				// Fail closed for reads: don't hand out data we couldn't
 				// record. Successful writes never reach here.
-				if e.Result == resultAllowed && (action == actionGet || action == actionList) {
+				if e.Result == resultAllowed && readsData(action) {
 					writeErr(w, http.StatusInternalServerError, "audit failed")
 					return
 				}
@@ -221,15 +236,15 @@ func requestIDFrom(ctx context.Context) string {
 // clientIP returns the caller's IP without the port, or "unknown". It is
 // the audit remote_addr and the key for the unauthenticated rate limit.
 //
-// With trustProxy, X-Forwarded-For is honoured only when the direct peer is
-// loopback, i.e. the co-located reverse proxy; from anyone else the header
-// is attacker-controlled and ignored. Only the rightmost entry is used:
-// Caddy appends the address it saw, and everything to its left came from
+// X-Forwarded-For is honoured only when the direct peer is inside one of
+// the trusted proxy networks; from anyone else the header is
+// attacker-controlled and ignored. Only the rightmost entry is used: the
+// proxy appends the address it saw, and everything to its left came from
 // the client. If that entry is not a valid IP we fall back to the peer
 // rather than scanning further left into client-supplied values.
-func clientIP(r *http.Request, trustProxy bool) string {
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	peer := parseIP(r.RemoteAddr)
-	if trustProxy && peer != nil && peer.IsLoopback() {
+	if peer != nil && ipInNets(peer, trusted) {
 		if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
 			last := xff[len(xff)-1]
 			if i := strings.LastIndexByte(last, ','); i >= 0 {
@@ -246,6 +261,15 @@ func clientIP(r *http.Request, trustProxy bool) string {
 	return peer.String()
 }
 
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseIP accepts "host:port" or a bare IP. RemoteAddr is always set by
 // net/http; the bare form keeps odd test or proxy values well-formed.
 func parseIP(addr string) net.IP {
@@ -254,4 +278,14 @@ func parseIP(addr string) net.IP {
 		host = addr
 	}
 	return net.ParseIP(strings.TrimSpace(host))
+}
+
+// readsData reports actions that return stored data. Their responses are
+// withheld when the audit row can't be written.
+func readsData(action string) bool {
+	switch action {
+	case actionGet, actionList, actionTokenList, actionAuditRead:
+		return true
+	}
+	return false
 }
