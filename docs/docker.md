@@ -56,10 +56,12 @@ docker compose logs hush   # 应看到 "listening" 和 "key_source":"file"
 ### 2.4 创建第一个 admin token
 
 ```bash
-docker compose exec hush hush-hush token create --name admin --role admin
+docker compose exec hush hush-hush token create --name admin --role admin --expires 30d
 ```
 
 token 只打印这一次。把它存进密码管理器。
+
+**admin token 只给人用，必须设置有效期**，最长 90 天。快到期前（界面会在最后 7 天提醒，服务启动日志里也有警告）新建一个 admin token 换上，再吊销旧的。admin token 不能续期：一个泄露的 admin token 没法给自己延长寿命。
 
 ### 2.5 配置反向代理
 
@@ -116,6 +118,8 @@ docker compose exec hush hush-hush token create --name crawler --role agent \
 3. 在审计日志里确认旧 token 已经不再出现：`hush-hush audit --token llm-agent --since 1d`；
 4. 吊销旧 token。吊销立即生效且不可撤销。
 
+admin token 的轮换方式相同：在界面里用当前 admin token 新建一个 admin token，换上新的重新登录，再吊销旧的。当前正在用的 token 不能在界面里吊销自己。
+
 ## 4. 备份与恢复
 
 ### 备份
@@ -158,16 +162,7 @@ docker compose exec hush hush-hush audit --token llm-agent --result denied --sin
 0 3 * * 0  cd /path/to/hush-hush && docker compose exec -T hush hush-hush audit-prune --older-than 180d
 ```
 
-## 6. 从 AUTH_TOKEN 迁移
-
-旧版本只有一个 `AUTH_TOKEN`。新版本仍然把它当作一个 admin token 接受（审计日志里记为 `env:AUTH_TOKEN`），但它无法按前缀限制，也无法单独吊销。迁移步骤：
-
-1. 用 `AUTH_TOKEN` 登录管理界面，或者用命令行，为每个调用方各建一个 token；
-2. 逐个切换调用方；
-3. 用 `hush-hush audit --token env:AUTH_TOKEN --since 1d` 确认已经没有调用方在用它；
-4. 从 compose 配置里删掉 `AUTH_TOKEN`，然后执行 `docker compose up -d`。
-
-## 7. 升级
+## 6. 升级
 
 ```bash
 (umask 077; docker compose exec -T hush hush-hush backup --out - > pre-upgrade.db)
@@ -175,11 +170,11 @@ git pull
 docker compose up -d --build
 ```
 
-数据库结构迁移在启动时自动执行，并且是幂等的。**先备份再升级**：新版本迁移过的数据库，旧版本会拒绝启动；要回退，只能用升级前的备份恢复。
+数据库结构迁移在启动时自动执行，并且是幂等的。升级到"admin token 必须过期"的版本时，永不过期或有效期超过 90 天的 admin token 会被改为从升级时起 30 天后到期，请在这期间换上新的 admin token。**先备份再升级**：新版本迁移过的数据库，旧版本会拒绝启动；要回退，只能用升级前的备份恢复。
 
 从 v0.1.0 的数据库迁移过来：把旧的 `hush.db` 按第 4 节的恢复步骤放进数据卷，并使用原来的 `MASTER_KEY`。
 
-## 8. 配置参考
+## 7. 配置参考
 
 | 环境变量 | 镜像默认值 | 说明 |
 |---|---|---|
@@ -191,9 +186,8 @@ docker compose up -d --build
 | `RATE_LIMIT_PER_MINUTE` | 60 | 每个 token 每分钟的请求上限 |
 | `UNAUTH_RATE_LIMIT_PER_MINUTE` | 10 | 每个 IP 每分钟允许的鉴权失败次数 |
 | `ADMIN_API` | `true` | 设为 `false` 会关闭 `/v1/admin/*` 和管理界面，只能用命令行管理 |
-| `AUTH_TOKEN` | – | 已弃用，见第 6 节 |
 
-## 9. 常见问题
+## 8. 常见问题
 
 **`docker compose logs` 里有 `permission denied`，读不了 `/run/secrets/master_key`。**
 `master_key` 文件的属主不是 65532。执行 `sudo chown 65532:65532 master_key`。

@@ -56,8 +56,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if !c.adminAPI {
 		t.Error("admin API should default to on")
 	}
-	if c.legacyToken != "" || len(c.warnings) != 0 {
-		t.Errorf("legacyToken=%q warnings=%v, want none", c.legacyToken, c.warnings)
+	if len(c.warnings) != 0 {
+		t.Errorf("warnings=%v, want none", c.warnings)
 	}
 	if !bytes.Equal(c.key, testKey()) || c.keySource != keySourceEnv {
 		t.Errorf("key source %q, key mismatch=%v", c.keySource, !bytes.Equal(c.key, testKey()))
@@ -249,11 +249,6 @@ func TestLoadConfig_TrustedProxies(t *testing.T) {
 			}
 		})
 	}
-	// The removed variable must not be silently ignored.
-	env := map[string]string{"MASTER_KEY": envKeyB64, "TRUST_PROXY_HEADERS": "true"}
-	if _, err := loadConfig(fakeEnv(env, nil)); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXIES") {
-		t.Errorf("TRUST_PROXY_HEADERS: err = %v, want a pointer to TRUSTED_PROXIES", err)
-	}
 }
 
 func TestLoadConfig_AdminAPI(t *testing.T) {
@@ -269,12 +264,29 @@ func TestLoadConfig_AdminAPI(t *testing.T) {
 }
 
 func TestLoadConfig_PassThrough(t *testing.T) {
-	c := mustLoad(t, map[string]string{
-		"MASTER_KEY": envKeyB64,
-		"DB_PATH":    "/var/lib/hush/hush.db",
-		"AUTH_TOKEN": legacyToken,
-	}, nil)
-	if c.dbPath != "/var/lib/hush/hush.db" || c.legacyToken != legacyToken {
-		t.Errorf("dbPath=%q legacyToken set=%v", c.dbPath, c.legacyToken == legacyToken)
+	c := mustLoad(t, map[string]string{"MASTER_KEY": envKeyB64, "DB_PATH": "/data/hush.db"}, nil)
+	if c.dbPath != "/data/hush.db" {
+		t.Errorf("dbPath=%q", c.dbPath)
+	}
+}
+
+// Settings earlier versions read are ignored with a warning each, so a
+// stale deployment config is visible in the startup log.
+func TestLoadConfig_RemovedSettingsWarn(t *testing.T) {
+	env := map[string]string{"MASTER_KEY": envKeyB64}
+	for _, name := range removedEnv {
+		env[name] = "x"
+	}
+	c := mustLoad(t, env, nil)
+	if len(c.warnings) != len(removedEnv) {
+		t.Fatalf("warnings = %v, want one per removed setting", c.warnings)
+	}
+	for i, name := range removedEnv {
+		if !strings.HasPrefix(c.warnings[i], name+" is no longer supported") {
+			t.Errorf("warning %q does not name %s", c.warnings[i], name)
+		}
+		if strings.Contains(c.warnings[i], "=x") {
+			t.Errorf("warning echoes the value: %q", c.warnings[i])
+		}
 	}
 }

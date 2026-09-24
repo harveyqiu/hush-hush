@@ -18,11 +18,6 @@ import (
 const (
 	roleAdmin = "admin"
 	roleAgent = "agent"
-
-	// legacyTokenName identifies the deprecated AUTH_TOKEN env var in logs
-	// and audit rows. The colon is outside tokenNameRe, so no DB token can
-	// ever collide with it.
-	legacyTokenName = "env:AUTH_TOKEN" // #nosec G101 -- a display label, not a credential
 )
 
 var tokenNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
@@ -39,6 +34,8 @@ type principal struct {
 	// writePrefixes are create-only grants: an agent may PUT a new name
 	// under them but never overwrite or delete.
 	writePrefixes []string
+	// expiresAt is the token's expiry (unix seconds), nil if it has none.
+	expiresAt *int64
 }
 
 func hashToken(token string) [32]byte {
@@ -68,10 +65,6 @@ func (s *server) authenticate(ctx context.Context, r *http.Request) (*principal,
 	// Hash first so every comparison is over 32 bytes; ConstantTimeCompare
 	// short-circuits on length mismatch and would otherwise leak length.
 	given := hashToken(tok)
-
-	if s.legacyTokenHash != nil && subtle.ConstantTimeCompare(given[:], s.legacyTokenHash[:]) == 1 {
-		return &principal{name: legacyTokenName, role: roleAdmin}, nil
-	}
 
 	// The lookup is keyed on the hash, never the plaintext. The row's hash
 	// is compared again in constant time so the decision does not rest on
@@ -103,6 +96,12 @@ func (s *server) authenticate(ctx context.Context, r *http.Request) (*principal,
 	if role != roleAdmin && role != roleAgent {
 		return nil, errUnauthenticated
 	}
+	if role == roleAdmin && !expiresAt.Valid {
+		// Admin tokens always expire (create enforces it, migration 5
+		// backfilled it); a row without an expiry was edited by hand.
+		slog.ErrorContext(ctx, "admin token without expiry; rejecting", "token_name", name)
+		return nil, errUnauthenticated
+	}
 	var prefixes, writePrefixes []string
 	if err := errors.Join(json.Unmarshal([]byte(prefJSON), &prefixes),
 		json.Unmarshal([]byte(writeJSON), &writePrefixes)); err != nil {
@@ -114,7 +113,8 @@ func (s *server) authenticate(ctx context.Context, r *http.Request) (*principal,
 		// Bookkeeping only; don't fail the request over it.
 		slog.WarnContext(ctx, "update last_used_at failed", "token_name", name, "error", err)
 	}
-	return &principal{name: name, role: role, prefixes: prefixes, writePrefixes: writePrefixes}, nil
+	return &principal{name: name, role: role, prefixes: prefixes, writePrefixes: writePrefixes,
+		expiresAt: nullToPtr(expiresAt)}, nil
 }
 
 // tokenSpec describes a token row to insert. Validation of name, role and
@@ -200,15 +200,9 @@ const allSecrets = "*"
 // from matching "llmx.key".
 var prefixRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,127}[._]$`)
 
-// validatePrefixes enforces the grant rules for a role. Admin tokens carry
-// no prefixes (they can read everything by role); agent tokens need at
-// least one, and "*" cannot be mixed with others.
-func validatePrefixes(role string, prefixes []string) error {
-	return validateGrants(role, prefixes, nil)
-}
-
-// validateGrants checks a token's full grant: read prefixes as in
-// validatePrefixes, plus create-only write prefixes. An agent needs at
+// validateGrants checks a token's grant. Admin tokens carry no prefixes
+// (they can read everything by role). For agents: read prefixes, where "*"
+// must stand alone, plus create-only write prefixes. An agent needs at
 // least one of the two. Write prefixes never accept "*": a token that can
 // create any name is an admin in all but name.
 func validateGrants(role string, prefixes, writePrefixes []string) error {

@@ -21,7 +21,7 @@ const cliUsage = `hush-hush — self-hosted secret store (server + admin CLI).
 Usage:
   hush-hush [serve]                 Start the HTTP API (default with no subcommand)
   hush-hush token create --name N --role agent --prefix llm. [--prefix github.] [--expires 90d]
-  hush-hush token create --name N --role admin [--expires 90d]
+  hush-hush token create --name N --role admin --expires 30d   (admin: required, at most 90d)
   hush-hush token create --name N --role agent --write-prefix crawler. [--prefix crawler.]
   hush-hush token list
   hush-hush token revoke --name N
@@ -217,7 +217,7 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 		spec.expiresAt = &t
 	}
 	// Validate before touching the database or prompting.
-	if err := validateTokenSpec(spec); err != nil {
+	if err := validateTokenSpec(spec, now); err != nil {
 		return fmt.Errorf("token create: %w", err)
 	}
 

@@ -36,14 +36,15 @@ func newTestServer(t *testing.T) (*server, http.Handler) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	s, err := newServer(db, testKey(), "")
+	s, err := newServer(db, testKey())
 	if err != nil {
 		t.Fatalf("newServer: %v", err)
 	}
 	// testToken is a named admin token in the tokens table, the way a
 	// real deployment's admin credential is provisioned.
+	exp := time.Now().Add(30 * 24 * time.Hour) // admin tokens always expire
 	if err := insertToken(context.Background(), db,
-		tokenSpec{name: "test-admin", role: roleAdmin}, testToken, time.Now()); err != nil {
+		tokenSpec{name: "test-admin", role: roleAdmin, expiresAt: &exp}, testToken, time.Now()); err != nil {
 		t.Fatalf("insert admin token: %v", err)
 	}
 	return s, s.routes()
@@ -491,18 +492,6 @@ func TestRequestID_Middleware(t *testing.T) {
 }
 
 // ---- Env helpers ----
-//
-// mustEnv's missing-var path calls fatal() which exits the process, so we
-// only test the present-and-non-empty path. getenv has no fatal path, so
-// both branches are covered.
-
-func TestMustEnv(t *testing.T) {
-	const k = "HUSH_TEST_MUSTENV"
-	t.Setenv(k, "value")
-	if got := mustEnv(k); got != "value" {
-		t.Errorf("mustEnv = %q, want %q", got, "value")
-	}
-}
 
 func TestGetenv(t *testing.T) {
 	const k = "HUSH_TEST_GETENV"

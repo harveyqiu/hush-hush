@@ -70,11 +70,24 @@ func grantsAll(prefixes []string) bool {
 	return len(prefixes) == 1 && prefixes[0] == allSecrets
 }
 
+// maxAdminLifetime caps how long an admin token may live. Admin tokens are
+// for humans; a short, mandatory lifetime bounds what a leaked one is worth
+// (it can mint agent tokens, but those die with nothing to renew them).
+const maxAdminLifetime = 90 * 24 * time.Hour
+
 // validateTokenSpec checks everything about a new token that doesn't need
 // the database.
-func validateTokenSpec(spec tokenSpec) error {
+func validateTokenSpec(spec tokenSpec, now time.Time) error {
 	if !tokenNameRe.MatchString(spec.name) {
 		return fmt.Errorf("name must match %s", tokenNameRe)
+	}
+	if spec.role == roleAdmin {
+		if spec.expiresAt == nil {
+			return errors.New("admin tokens must expire: set an expiry of at most 90d")
+		}
+		if spec.expiresAt.Sub(now) > maxAdminLifetime {
+			return errors.New("admin tokens may live at most 90d")
+		}
 	}
 	return validateGrants(spec.role, spec.prefixes, spec.writePrefixes)
 }
@@ -82,7 +95,7 @@ func validateTokenSpec(spec tokenSpec) error {
 // createToken validates spec, refuses a reused name, stores the hash and
 // returns the plaintext (the only time it exists) plus any warnings.
 func createToken(ctx context.Context, q dbtx, spec tokenSpec, now time.Time) (string, []string, error) {
-	if err := validateTokenSpec(spec); err != nil {
+	if err := validateTokenSpec(spec, now); err != nil {
 		return "", nil, err
 	}
 	if exists, err := tokenExists(ctx, q, spec.name); err != nil {

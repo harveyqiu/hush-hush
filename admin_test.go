@@ -154,12 +154,12 @@ func TestAdminAPI_CreateValidation(t *testing.T) {
 		{"agent without grants", map[string]any{"name": "a2", "role": "agent"}, http.StatusBadRequest},
 		{"admin with prefix", map[string]any{"name": "a3", "role": "admin", "prefixes": []string{"llm."}}, http.StatusBadRequest},
 		{"bad name", map[string]any{"name": "has space", "role": "admin"}, http.StatusBadRequest},
-		{"reserved legacy name", map[string]any{"name": legacyTokenName, "role": "admin"}, http.StatusBadRequest},
+		{"colon not allowed in names", map[string]any{"name": "env:AUTH_TOKEN", "role": "admin"}, http.StatusBadRequest},
 		{"write wildcard", map[string]any{"name": "a4", "role": "agent", "write_prefixes": []string{"*"}}, http.StatusBadRequest},
 		{"wildcard without confirm", map[string]any{"name": "a5", "role": "agent", "prefixes": []string{"*"}}, http.StatusBadRequest},
 		{"bad expires", map[string]any{"name": "a6", "role": "admin", "expires": "soon"}, http.StatusBadRequest},
 		{"unknown field", map[string]any{"name": "a7", "role": "admin", "is_root": true}, http.StatusBadRequest},
-		{"duplicate", map[string]any{"name": "test-admin", "role": "admin"}, http.StatusConflict},
+		{"duplicate", map[string]any{"name": "test-admin", "role": "admin", "expires": "30d"}, http.StatusConflict},
 		{"wildcard confirmed", map[string]any{"name": "a8", "role": "agent", "prefixes": []string{"*"}, "confirm_all": true}, http.StatusCreated},
 	}
 	for _, c := range cases {
@@ -224,7 +224,7 @@ func TestAdminAPI_MutationsAtomicWithAudit(t *testing.T) {
 	if _, err := s.db.Exec(`DROP TABLE audit_log`); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := adminJSON(t, h, testToken, "POST", "/v1/admin/tokens", map[string]any{"name": "new", "role": "admin"}); code != http.StatusInternalServerError || out["token"] != nil {
+	if code, out := adminJSON(t, h, testToken, "POST", "/v1/admin/tokens", map[string]any{"name": "new", "role": "admin", "expires": "30d"}); code != http.StatusInternalServerError || out["token"] != nil {
 		t.Errorf("create with audit down: %d %v", code, out)
 	}
 	if exists, _ := tokenExists(t.Context(), s.db, "new"); exists {

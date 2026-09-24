@@ -19,6 +19,10 @@ const (
 	keySourceEnv  = "env"
 )
 
+// removedEnv are settings earlier versions read. They are ignored, with a
+// startup warning so a stale deployment config doesn't fail silently.
+var removedEnv = []string{"AUTH_TOKEN", "PORT", "TRUST_PROXY_HEADERS"}
+
 // config is everything serve() needs from the environment, already
 // validated. The key is held here only long enough to build the server.
 type config struct {
@@ -26,7 +30,6 @@ type config struct {
 	dbPath                   string
 	key                      []byte
 	keySource                string
-	legacyToken              string
 	rateLimitPerMinute       int
 	unauthRateLimitPerMinute int
 	// trustedProxies are the peers whose X-Forwarded-For is believed.
@@ -44,9 +47,8 @@ type config struct {
 // Returned errors never contain key material.
 func loadConfig(getenv func(string) string, readFile func(string) ([]byte, error)) (config, error) {
 	c := config{
-		dbPath:      defaultDBPath,
-		legacyToken: getenv("AUTH_TOKEN"),
-		listenAddr:  defaultListenAddr,
+		dbPath:     defaultDBPath,
+		listenAddr: defaultListenAddr,
 	}
 	if v := getenv("DB_PATH"); v != "" {
 		c.dbPath = v
@@ -58,8 +60,10 @@ func loadConfig(getenv func(string) string, readFile func(string) ([]byte, error
 		}
 		c.listenAddr = v
 	}
-	if getenv("PORT") != "" {
-		c.warnings = append(c.warnings, "PORT is ignored; set LISTEN_ADDR (e.g. 0.0.0.0:8080) instead")
+	for _, name := range removedEnv {
+		if getenv(name) != "" {
+			c.warnings = append(c.warnings, name+" is no longer supported and is ignored; see docs/docker.md")
+		}
 	}
 
 	var err error
@@ -74,11 +78,6 @@ func loadConfig(getenv func(string) string, readFile func(string) ([]byte, error
 		return config{}, err
 	}
 
-	if getenv("TRUST_PROXY_HEADERS") != "" {
-		// Fail rather than silently change which peers are trusted.
-		return config{}, errors.New("TRUST_PROXY_HEADERS was replaced by TRUSTED_PROXIES; " +
-			"use TRUSTED_PROXIES=127.0.0.1/32 for the old behaviour")
-	}
 	if c.trustedProxies, err = parseTrustedProxies(getenv("TRUSTED_PROXIES")); err != nil {
 		return config{}, err
 	}

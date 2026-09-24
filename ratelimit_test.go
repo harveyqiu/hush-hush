@@ -206,14 +206,14 @@ func TestRateLimiter_PrunesFullBuckets(t *testing.T) {
 	if ok, _ := l.allow("busy", t0.Add(55*time.Second)); !ok {
 		t.Fatal("busy should have refilled one request")
 	}
-	if got := l.size(); got != 101 {
+	if got := bucketCount(l); got != 101 {
 		t.Fatalf("size = %d, want 101", got)
 	}
 	// Past the prune interval every k* bucket (1 used, refills in 30s) is
 	// full, but "busy" (about 1.03 of 2) is not and must survive.
 	at := t0.Add(61 * time.Second)
 	l.allow("probe", at)
-	if got := l.size(); got != 2 {
+	if got := bucketCount(l); got != 2 {
 		t.Errorf("after prune size = %d, want 2 (busy + probe)", got)
 	}
 	if ok, _ := l.allow("busy", at); !ok {
@@ -236,14 +236,14 @@ func TestRateLimiter_BoundedMemory(t *testing.T) {
 	if ok || wait <= 0 {
 		t.Errorf("new key at capacity: ok=%v wait=%v, want refused", ok, wait)
 	}
-	if got := l.size(); got != maxBuckets {
+	if got := bucketCount(l); got != maxBuckets {
 		t.Errorf("size = %d, want %d", got, maxBuckets)
 	}
 	// Once the old buckets refill they are pruned and new keys fit again.
 	if ok, _ := l.allow("new", t0.Add(2*time.Minute)); !ok {
 		t.Error("new key refused after old buckets refilled")
 	}
-	if got := l.size(); got != 1 {
+	if got := bucketCount(l); got != 1 {
 		t.Errorf("size after prune = %d, want 1", got)
 	}
 }
@@ -360,4 +360,10 @@ func TestClientIP_DockerBridgeProxy(t *testing.T) {
 	if got := clientIP(r, nets); got != "172.17.0.2" {
 		t.Errorf("from untrusted neighbour = %q, want its own address", got)
 	}
+}
+
+func bucketCount(l *rateLimiter) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
 }

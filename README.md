@@ -81,7 +81,7 @@ Full guide, in Chinese: [`docs/docker.md`](docs/docker.md). The short version, f
 openssl rand -base64 32 > master_key                  # back this up offline, apart from data backups
 sudo chown 65532:65532 master_key && sudo chmod 400 master_key
 docker compose up -d                                  # builds the image, starts on 127.0.0.1:8080
-docker compose exec hush hush-hush token create --name admin --role admin
+docker compose exec hush hush-hush token create --name admin --role admin --expires 30d
 ```
 
 Point your HTTPS reverse proxy at `127.0.0.1:8080`, open `https://<your-host>/ui/` and log in with the admin token.
@@ -109,7 +109,6 @@ docker run -d --name hush --restart unless-stopped \
 | `RATE_LIMIT_PER_MINUTE` | 60 | Per token. |
 | `UNAUTH_RATE_LIMIT_PER_MINUTE` | 10 | Per client IP, failed authentication only. |
 | `ADMIN_API` | `true` | `false` disables `/v1/admin/*` and the web UI. |
-| `AUTH_TOKEN` | – | Deprecated single admin token (`env:AUTH_TOKEN` in the audit log). |
 
 ## API
 
@@ -183,7 +182,7 @@ Every `/v1/secrets` request writes one `audit_log` row: time, token name, action
 
 ### Web UI
 
-`https://<your-host>/ui/` (the root path redirects there). Log in by pasting an **admin** token; agent tokens are refused.
+`https://<your-host>/ui/` (the root path redirects there). Log in by pasting an **admin** token; agent tokens are refused. The header shows when your token expires and warns in its last 7 days.
 
 - **Secrets:** list and filter, view (value shown only inside the dialog), create, overwrite, delete.
 - **Tokens:** list with status and last use, create (plaintext shown once), change read/write prefixes, revoke.
@@ -198,9 +197,10 @@ Used by the UI; admin tokens only, rate limited and audited like everything else
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | `GET` | `/v1/admin/tokens` | — | `{"tokens":[{name, role, prefixes, write_prefixes, status, expires_at, last_used_at, revoked_at, created_at}]}` (never hashes) |
-| `POST` | `/v1/admin/tokens` | `{name, role, prefixes, write_prefixes, expires: "90d", confirm_all}` | `201 {name, token, warnings}`, the only time the token is shown |
+| `POST` | `/v1/admin/tokens` | `{name, role, prefixes, write_prefixes, expires: "30d", confirm_all}` (admin: `expires` required, ≤ 90d) | `201 {name, token, warnings}`, the only time the token is shown |
 | `PATCH` | `/v1/admin/tokens/{name}` | `{prefixes?, write_prefixes?, confirm_all}` | new lists; a missing field keeps its list |
 | `DELETE` | `/v1/admin/tokens/{name}` | — | revokes (permanent) |
+| `GET` | `/v1/admin/me` | — | `{name, role, expires_at}` of the calling token (the UI shows its expiry) |
 | `GET` | `/v1/admin/audit` | `?token=&secret=&action=&result=&since=24h&until=&limit=100` | `{"records":[...]}` newest first |
 
 A `*` read prefix needs `"confirm_all": true`.
@@ -210,7 +210,7 @@ A `*` read prefix needs `"confirm_all": true`.
 The same operations are available as CLI subcommands inside the container. They open the database file directly, so they work even with `ADMIN_API=false` or the server stopped:
 
 ```bash
-docker compose exec hush hush-hush token create --name admin-laptop --role admin
+docker compose exec hush hush-hush token create --name admin-laptop --role admin --expires 30d
 docker compose exec hush hush-hush token create --name llm-agent --role agent --prefix llm. --prefix github. --expires 90d
 docker compose exec hush hush-hush token create --name crawler --role agent --prefix crawler. --write-prefix crawler.
 docker compose exec hush hush-hush token list
@@ -222,9 +222,9 @@ docker compose exec hush hush-hush audit-prune --older-than 180d
 docker compose exec -T hush hush-hush backup --out - > backup-$(date +%F).db
 ```
 
-`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first; see `hush-hush help` for every flag.
+`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. **Admin tokens are for humans and must expire** (`--expires`, at most 90d); rotate them by creating a new one and revoking the old. Agent tokens may be permanent. `audit` prints newest first; see `hush-hush help` for every flag.
 
-Backups, restore, rotation and moving off `AUTH_TOKEN` are covered in [`docs/docker.md`](docs/docker.md).
+Backups, restore and token rotation are covered in [`docs/docker.md`](docs/docker.md).
 
 If you are writing an agent or script that consumes secrets, hand it [`docs/agent-guide.md`](docs/agent-guide.md): endpoints, status-code handling, retry rules, code samples and a system-prompt snippet for LLM agents (in Chinese).
 
@@ -316,7 +316,7 @@ export DB_PATH=./hush.db
 go run .
 
 # In another shell, same DB_PATH: create a token
-go run . token create --name dev --role admin
+go run . token create --name dev --role admin --expires 30d
 
 # Test
 go test ./...

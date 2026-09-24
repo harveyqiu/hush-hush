@@ -26,6 +26,7 @@ const (
 	actionTokenUpdate = "token_update"
 	actionTokenRevoke = "token_revoke"
 	actionAuditRead   = "audit_read"
+	actionWhoami      = "whoami"
 )
 
 // maxAdminBody bounds admin request bodies; they carry names and prefix
@@ -38,6 +39,7 @@ func (s *server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/admin/tokens/{name}", s.secretsRoute(actionTokenUpdate, requireAdmin(s.adminUpdateToken)))
 	mux.HandleFunc("DELETE /v1/admin/tokens/{name}", s.secretsRoute(actionTokenRevoke, requireAdmin(s.adminRevokeToken)))
 	mux.HandleFunc("GET /v1/admin/audit", s.secretsRoute(actionAuditRead, requireAdmin(s.adminAudit)))
+	mux.HandleFunc("GET /v1/admin/me", s.secretsRoute(actionWhoami, requireAdmin(s.adminMe)))
 	// Anything else under /v1/admin is still authenticated and audited.
 	mux.HandleFunc("/v1/admin/", s.secretsRoute(actionOther, requireAdmin(func(w http.ResponseWriter, _ *http.Request) {
 		writeErr(w, http.StatusNotFound, "not found")
@@ -88,6 +90,13 @@ func tokenErrStatus(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
+// adminMe tells the UI which token it is using and when that expires, so
+// the operator can rotate before being locked out.
+func (s *server) adminMe(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"name": p.name, "role": p.role, "expires_at": p.expiresAt})
+}
+
 func (s *server) adminListTokens(w http.ResponseWriter, r *http.Request) {
 	tokens, err := listTokens(r.Context(), s.db, s.now())
 	if err != nil {
@@ -126,7 +135,7 @@ func (s *server) adminCreateToken(w http.ResponseWriter, r *http.Request) {
 		t := now.Add(d)
 		spec.expiresAt = &t
 	}
-	if err := validateTokenSpec(spec); err != nil {
+	if err := validateTokenSpec(spec, now); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

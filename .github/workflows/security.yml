@@ -61,7 +61,7 @@ jobs:
             sleep 2
           done
           docker inspect -f '{{.State.Health.Status}}' hush | grep -qx healthy
-          TOKEN=$(docker exec hush hush-hush token create --name ci --role admin 2>/dev/null)
+          TOKEN=$(docker exec hush hush-hush token create --name ci --role admin --expires 1d 2>/dev/null)
           curl -fsS -X PUT http://127.0.0.1:8080/v1/secrets/ci.check \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"value":"ok"}'
           curl -fsS http://127.0.0.1:8080/v1/secrets/ci.check -H "Authorization: Bearer $TOKEN" | grep -q '"value":"ok"'

@@ -11,7 +11,7 @@ import (
 
 func TestCLI_Backup(t *testing.T) {
 	path := newTestDBFile(t)
-	tok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "adm", "--role", "admin").stdout)
+	tok := strings.TrimSpace(runCLI(t, "", "token", "create", "--db", path, "--name", "adm", "--role", "admin", "--expires", "30d").stdout)
 	_, h := serverOn(t, path)
 	if rr := do(h, reqWithToken("PUT", "/v1/secrets/llm.k", tok, []byte(`{"value":"backed-up"}`))); rr.Code != 200 {
 		t.Fatalf("seed: %d", rr.Code)

@@ -46,10 +46,7 @@ var requestIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 type server struct {
 	db  *sql.DB
 	gcm cipher.AEAD
-	// legacyTokenHash is set only when the deprecated AUTH_TOKEN env var
-	// is in use; it then authenticates as an admin.
-	legacyTokenHash *[32]byte
-	now             func() time.Time
+	now func() time.Time
 	// tokenLimiter is keyed by authenticated token name; ipLimiter by
 	// client IP and consumed only by requests that fail authentication.
 	tokenLimiter *rateLimiter
@@ -94,7 +91,7 @@ func serve() {
 	defer db.Close()
 	checkDBPerms(dbPath)
 
-	s, err := newServer(db, cfg.key, cfg.legacyToken)
+	s, err := newServer(db, cfg.key)
 	if err != nil {
 		fatal("server init failed", "error", err)
 	}
@@ -106,8 +103,13 @@ func serve() {
 	s.adminAPI = cfg.adminAPI
 	if n, err := s.activeTokenCount(); err != nil {
 		fatal("token count failed", "error", err)
-	} else if n == 0 && cfg.legacyToken == "" {
+	} else if n == 0 {
 		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
+	}
+	if names, err := s.adminTokensExpiringWithin(7 * 24 * time.Hour); err != nil {
+		fatal("token expiry check failed", "error", err)
+	} else if len(names) > 0 {
+		slog.Warn("admin tokens expire within 7 days; create replacements before they lapse", "tokens", names)
 	}
 
 	srv := &http.Server{
@@ -148,8 +150,7 @@ func serve() {
 // newServer constructs a server from already-validated dependencies.
 // Extracted from main() so tests can build a server against an in-memory
 // database without parsing env vars or duplicating crypto setup.
-// legacyToken is the deprecated AUTH_TOKEN value, or "" when unset.
-func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
+func newServer(db *sql.DB, key []byte) (*server, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -166,12 +167,28 @@ func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
 		ipLimiter:    newRateLimiter(defaultUnauthRateLimitPerMinute),
 		adminAPI:     true, // matches the ADMIN_API default; serve() applies the config
 	}
-	if legacyToken != "" {
-		slog.Warn("AUTH_TOKEN is deprecated: it is accepted as an admin token but cannot be scoped or revoked individually; create named tokens with `token create` and unset AUTH_TOKEN")
-		h := hashToken(legacyToken)
-		s.legacyTokenHash = &h
-	}
 	return s, nil
+}
+
+// adminTokensExpiringWithin names active admin tokens that expire within d.
+func (s *server) adminTokensExpiringWithin(d time.Duration) ([]string, error) {
+	now := s.now()
+	rows, err := s.db.Query(`SELECT name FROM tokens
+		WHERE role = 'admin' AND revoked_at IS NULL AND expires_at > ? AND expires_at <= ?
+		ORDER BY name`, now.Unix(), now.Add(d).Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
 }
 
 func (s *server) activeTokenCount() (int, error) {
@@ -477,14 +494,6 @@ func aad(name string) []byte {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-func mustEnv(k string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		fatal("missing required env var", "key", k)
-	}
-	return v
 }
 
 func getenv(k, def string) string {

@@ -4,7 +4,7 @@
 #        openssl rand -base64 32 > master_key
 #        sudo chown 65532:65532 master_key && sudo chmod 400 master_key
 #   2. docker compose up -d
-#   3. docker compose exec hush hush-hush token create --name admin --role admin
+#   3. docker compose exec hush hush-hush token create --name admin --role admin --expires 30d
 #   4. Put your HTTPS reverse proxy in front of 127.0.0.1:8080, then open /ui/.
 #
 # Full guide: docs/docker.md

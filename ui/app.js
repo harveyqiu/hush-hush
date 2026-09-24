@@ -14,7 +14,8 @@
   const IDLE_LIMIT_MS = 15 * 60 * 1000;
   const NAME_RE = /^[a-zA-Z0-9_.-]{1,128}$/;
   const AUDIT_ACTIONS = ['get', 'list', 'put', 'delete', 'other',
-    'token_list', 'token_create', 'token_update', 'token_revoke', 'audit_read'];
+    'token_list', 'token_create', 'token_update', 'token_revoke', 'audit_read', 'whoami'];
+  const SOON_S = 7 * 24 * 3600; // warn when a token expires within 7 days
   const AUDIT_RESULTS = ['allowed', 'denied', 'not_found', 'conflict',
     'unauthenticated', 'rate_limited', 'bad_request', 'error'];
 
@@ -206,6 +207,8 @@
     secretsCache = [];
     tokensCache = [];
     for (const id of ['secret-rows', 'token-rows', 'audit-rows']) $(id).replaceChildren();
+    $('expiry-note').hidden = true;
+    $('whoami').textContent = '';
     if (dialog.open) dialog.close();
     banner('');
     showLogin(msg);
@@ -213,9 +216,10 @@
 
   async function login(candidate) {
     token = candidate;
+    let me;
     try {
       // An admin-only endpoint: proves the token is valid AND admin.
-      await api('GET', '/v1/admin/tokens');
+      me = await api('GET', '/v1/admin/me');
     } catch (e) {
       token = null;
       if (e.status === 401) return showLogin('token 无效、已吊销或已过期');
@@ -226,8 +230,19 @@
     lastActivity = Date.now();
     $('login').hidden = true;
     $('app').hidden = false;
-    $('whoami').textContent = '已登录（admin）';
+    showExpiry(me);
     switchTab(storage.get(TAB_KEY) || 'secrets');
+  }
+
+  // Admin tokens always expire; say when, and nag during the last week so
+  // the operator creates a replacement before being locked out.
+  function showExpiry(me) {
+    const exp = me.expires_at;
+    $('whoami').textContent = `已登录：${me.name}${exp ? `（${fmtTime(exp)} 到期）` : ''}`;
+    const note = $('expiry-note');
+    const left = exp ? exp - Date.now() / 1000 : Infinity;
+    note.hidden = left > SOON_S;
+    note.textContent = note.hidden ? '' : `当前 admin token 将在 ${fmtTime(exp)} 到期。请在 Tokens 页新建一个 admin token 并改用它，然后吊销这个。`;
   }
 
   $('login-form').addEventListener('submit', (ev) => {
@@ -384,7 +399,9 @@
         el('td', { text: t.role }),
         el('td', { class: 'mono', text: isAdmin ? '（全部）' : joinList(t.prefixes) }),
         el('td', { class: 'mono', text: isAdmin ? '（全部，可覆盖/删除）' : joinList(t.write_prefixes) }),
-        el('td', {}, el('span', { class: `pill ${t.status}`, text: t.status })),
+        el('td', {}, el('span', { class: `pill ${t.status}`, text: t.status }),
+          active && t.expires_at && t.expires_at - Date.now() / 1000 <= SOON_S
+            ? el('span', { class: 'pill expired', text: '即将过期' }) : null),
         el('td', { text: t.expires_at ? fmtTime(t.expires_at) : '永不' }),
         el('td', { text: fmtTime(t.last_used_at) }),
         el('td', { class: 'actions' },
@@ -442,15 +459,24 @@
     const roleInput = el('select', {},
       el('option', { value: 'agent', text: 'agent（按前缀只读，可选只新建）' }),
       el('option', { value: 'admin', text: 'admin（全部读写删，可管理 token）' }));
-    const expiresInput = el('input', { autocomplete: 'off', placeholder: '例如 90d、12h；留空表示永不过期' });
+    const expiresInput = el('input', { autocomplete: 'off' });
     const grants = grantFields('', '');
-    roleInput.addEventListener('change', () => grants.setDisabled(roleInput.value === 'admin'));
+    // Admin tokens must expire (at most 90d); agents may be permanent.
+    const syncRole = () => {
+      const isAdmin = roleInput.value === 'admin';
+      grants.setDisabled(isAdmin);
+      expiresInput.placeholder = isAdmin ? '必填，最长 90d' : '例如 90d、12h；留空表示永不过期';
+      if (isAdmin && !expiresInput.value.trim()) expiresInput.value = '30d';
+    };
+    roleInput.addEventListener('change', syncRole);
+    syncRole();
     openDialog({
       title: '新建 token',
       body: [field('名称', nameInput), field('角色', roleInput), ...grants.nodes, field('有效期', expiresInput)],
       okText: '创建',
       onOk: async () => {
         const isAdmin = roleInput.value === 'admin';
+        if (isAdmin && !expiresInput.value.trim()) throw new Error('admin token 必须设置有效期（最长 90d）');
         const body = {
           name: nameInput.value.trim(),
           role: roleInput.value,

@@ -20,7 +20,7 @@ const (
 
 var (
 	auditActions = []string{actionGet, actionList, actionPut, actionDelete, actionOther,
-		actionTokenList, actionTokenCreate, actionTokenUpdate, actionTokenRevoke, actionAuditRead}
+		actionTokenList, actionTokenCreate, actionTokenUpdate, actionTokenRevoke, actionAuditRead, actionWhoami}
 	auditResults = []string{resultAllowed, resultDenied, resultNotFound, resultUnauthenticated,
 		resultRateLimited, resultBadRequest, resultConflict, resultError}
 )

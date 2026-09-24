@@ -35,7 +35,7 @@ This is a deliberately minimal self-hosted tool for one operator and a handful o
 - **Agent-created secrets**: an agent with write prefixes can create new names there (never overwrite or delete). Anything that reads that namespace should treat those values as agent-supplied.
 - **In-memory rate limits** reset on restart.
 - **Audit `remote_addr` is advisory** for callers on the same host: with `TRUSTED_PROXIES` covering the Docker gateway (the compose default), any local process that reaches the published port can set its own `X-Forwarded-For`.
-- **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; keep admin tokens with humans, give them expiries, and set `ADMIN_API=false` if you only manage tokens from the CLI. Every admin call is audited.
+- **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; admin tokens are for humans and always expire (at most 90 days, enforced on create and at authentication); set `ADMIN_API=false` if you only manage tokens from the CLI. Every admin call is audited.
 
 If your use case requires any of those properties, please pick a different tool — see the [README's "What this isn't" section](README.md#what-this-isnt).
 
