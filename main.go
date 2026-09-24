@@ -194,6 +194,10 @@ func (s *server) routes() http.Handler {
 	// instead of being answered by the mux without a trace.
 	mux.HandleFunc("/v1/secrets", s.secretsRoute(actionOther, unmatched))
 	mux.HandleFunc("/v1/secrets/", s.secretsRoute(actionOther, unmatched))
+	if s.adminAPI {
+		s.adminRoutes(mux)
+		s.uiRoutes(mux)
+	}
 	return mux
 }
 

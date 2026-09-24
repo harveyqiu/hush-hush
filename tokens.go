@@ -36,6 +36,12 @@ var (
 	errNotAgentToken = errors.New("only agent tokens have prefixes")
 )
 
+// grantError marks a rejected prefix set (the caller's input was wrong),
+// as opposed to a lookup or database failure.
+type grantError struct{ error }
+
+func (e grantError) Unwrap() error { return e.error }
+
 // tokenInfo is the public view of a token row. It deliberately has no hash
 // field, so no caller can leak one by accident.
 type tokenInfo struct {
@@ -189,7 +195,7 @@ func updateTokenGrants(ctx context.Context, q dbtx, name string, u grantUpdate) 
 		write = append([]string{}, *u.writePrefixes...)
 	}
 	if err := validateGrants(roleAgent, read, write); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, grantError{err}
 	}
 	if u.writePrefixes != nil {
 		if warnings, err = writeNamespaceOverlaps(ctx, q, name, write); err != nil {

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>hush-hush 管理</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="login" class="login" hidden>
+    <h1>hush-hush</h1>
+    <p class="muted">用 admin token 登录。token 只保存在当前标签页，关闭即失效。</p>
+    <form id="login-form" class="stack">
+      <input id="login-token" type="password" autocomplete="off" spellcheck="false" placeholder="hush_…" required>
+      <button type="submit">登录</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </main>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <strong>hush-hush</strong>
+      <nav>
+        <button class="tab" data-tab="secrets">Secrets</button>
+        <button class="tab" data-tab="tokens">Tokens</button>
+        <button class="tab" data-tab="audit">审计日志</button>
+      </nav>
+      <span id="whoami" class="muted"></span>
+      <button id="logout" class="secondary">退出</button>
+    </header>
+
+    <p id="banner" class="banner" hidden></p>
+
+    <section id="tab-secrets" class="panel" hidden>
+      <div class="toolbar">
+        <input id="secret-filter" type="search" placeholder="按名称过滤">
+        <button id="secret-refresh" class="secondary">刷新</button>
+        <button id="secret-new">新建 secret</button>
+      </div>
+      <table>
+        <thead><tr><th>名称</th><th>创建时间</th><th>更新时间</th><th></th></tr></thead>
+        <tbody id="secret-rows"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-tokens" class="panel" hidden>
+      <div class="toolbar">
+        <button id="token-refresh" class="secondary">刷新</button>
+        <button id="token-new">新建 token</button>
+      </div>
+      <table>
+        <thead><tr><th>名称</th><th>角色</th><th>读前缀</th><th>写前缀</th><th>状态</th><th>过期</th><th>最近使用</th><th></th></tr></thead>
+        <tbody id="token-rows"></tbody>
+      </table>
+    </section>
+
+    <section id="tab-audit" class="panel" hidden>
+      <form id="audit-form" class="toolbar wrap">
+        <input name="token" placeholder="token 名称">
+        <input name="secret" placeholder="secret / 目标名称">
+        <select name="action"><option value="">全部动作</option></select>
+        <select name="result"><option value="">全部结果</option></select>
+        <input name="since" placeholder="起始（如 24h、7d）">
+        <input name="limit" type="number" min="1" max="10000" value="100">
+        <button type="submit">查询</button>
+      </form>
+      <table>
+        <thead><tr><th>时间</th><th>token</th><th>动作</th><th>目标</th><th>结果</th><th>来源</th><th>请求 ID</th></tr></thead>
+        <tbody id="audit-rows"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form" class="stack">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body" class="stack"></div>
+      <p id="dialog-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <!-- OK comes first in the DOM so Enter (implicit submit) means OK;
+             CSS row-reverse puts it on the right. -->
+        <button value="ok" id="dialog-ok">确定</button>
+        <button value="cancel" id="dialog-cancel" class="secondary" formnovalidate>取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

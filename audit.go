@@ -51,6 +51,15 @@ type auditEntry struct {
 
 type auditKey struct{}
 
+// setAuditTarget records the object a request acts on when it isn't in the
+// URL path (e.g. the name of a token being created from a JSON body). Only
+// well-formed names are kept, as for path names.
+func setAuditTarget(ctx context.Context, name string) {
+	if e, _ := ctx.Value(auditKey{}).(*auditEntry); e != nil && nameRe.MatchString(name) {
+		e.SecretName = name
+	}
+}
+
 // commitWithAudit inserts the request's "allowed" audit row inside tx and
 // commits, so a mutation and its record land atomically. Without an audit
 // entry in ctx it refuses to commit: an unaudited write is never allowed.
@@ -151,8 +160,10 @@ func (b *bufferedResponse) flushTo(w http.ResponseWriter) {
 	_, _ = w.Write(b.body.Bytes())
 }
 
-// secretsRoute is the single entry point for every /v1/secrets request:
-// authentication, then the handler, then exactly one audit row.
+// secretsRoute is the single entry point for every API request under
+// /v1/secrets and /v1/admin: authentication, rate limit, the handler, then
+// exactly one audit row. For admin token routes the {name} path value (the
+// target token) is what lands in secret_name.
 func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -204,7 +215,7 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 					"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
 				// Fail closed for reads: don't hand out data we couldn't
 				// record. Successful writes never reach here.
-				if e.Result == resultAllowed && (action == actionGet || action == actionList) {
+				if e.Result == resultAllowed && readsData(action) {
 					writeErr(w, http.StatusInternalServerError, "audit failed")
 					return
 				}
@@ -267,4 +278,14 @@ func parseIP(addr string) net.IP {
 		host = addr
 	}
 	return net.ParseIP(strings.TrimSpace(host))
+}
+
+// readsData reports actions that return stored data. Their responses are
+// withheld when the audit row can't be written.
+func readsData(action string) bool {
+	switch action {
+	case actionGet, actionList, actionTokenList, actionAuditRead:
+		return true
+	}
+	return false
 }
