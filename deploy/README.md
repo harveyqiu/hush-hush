@@ -351,7 +351,7 @@ Rotate immediately (revoke first, then create) if a token may have leaked.
 
 ## 4. Audit log
 
-Every request to `/v1/secrets` writes one row to the `audit_log` table: time, token name, action (`get`, `list`, `put`, `delete`), secret name, result, request ID and client IP. Secret values and tokens are never stored. If the audit row cannot be written, reads fail with 500 instead of returning data that was not recorded. `/healthz` is not audited.
+Every request to `/v1/secrets` writes one row to the `audit_log` table: time, token name, action (`get`, `list`, `put`, `delete`, or `other` for a request that matches no route, such as a wrong method), secret name, result, request ID and client IP. Secret values and tokens are never stored. If the audit row cannot be written, reads fail with 500 instead of returning data that was not recorded, and writes are rolled back: a PUT or DELETE commits in the same transaction as its audit row. `/healthz` is not audited.
 
 Results: `allowed`, `denied` (403), `not_found`, `unauthenticated` (401), `rate_limited` (429), `bad_request`, `error`.
 

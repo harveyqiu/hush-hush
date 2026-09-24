@@ -183,6 +183,11 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/secrets/{name}", s.secretsRoute(actionGet, s.get))
 	mux.HandleFunc("PUT /v1/secrets/{name}", s.secretsRoute(actionPut, requireAdmin(s.put)))
 	mux.HandleFunc("DELETE /v1/secrets/{name}", s.secretsRoute(actionDelete, requireAdmin(s.del)))
+	// Catch-alls so every other request under /v1/secrets (wrong method,
+	// nested path) is still authenticated, rate limited and audited
+	// instead of being answered by the mux without a trace.
+	mux.HandleFunc("/v1/secrets", s.secretsRoute(actionOther, unmatched))
+	mux.HandleFunc("/v1/secrets/", s.secretsRoute(actionOther, unmatched))
 	return mux
 }
 
@@ -361,8 +366,17 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 	ct := append([]byte{cryptoVersion}, s.gcm.Seal(nil, nonce, []byte(in.Value), aad(name))...)
 
 	now := time.Now().Unix()
+	// The upsert and its audit row commit together: a write either happens
+	// and is recorded, or neither happens.
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "put begin failed", "name", name, "error", err)
+		writeErr(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
 	var createdAt int64
-	err = s.db.QueryRowContext(r.Context(), `
+	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO secrets (name, ciphertext, nonce, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -374,6 +388,11 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.ErrorContext(r.Context(), "put exec failed", "name", name, "error", err)
 		writeErr(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if err := s.commitWithAudit(r.Context(), tx); err != nil {
+		slog.ErrorContext(r.Context(), "put commit failed", "name", name, "error", err)
+		writeErr(w, http.StatusInternalServerError, "audit failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -390,11 +409,25 @@ func (s *server) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Idempotent (admin only; agents are stopped by requireAdmin): a
-	// network retry of a successful DELETE should not surface as an error. We don't distinguish "deleted" from "wasn't
-	// there" — both end states are identical.
-	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM secrets WHERE name = ?`, name); err != nil {
+	// network retry of a successful DELETE should not surface as an error.
+	// We don't distinguish "deleted" from "wasn't there"; both end states
+	// are identical. As with PUT, the delete and its audit row commit
+	// together.
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "delete begin failed", "name", name, "error", err)
+		writeErr(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM secrets WHERE name = ?`, name); err != nil {
 		slog.ErrorContext(r.Context(), "delete exec failed", "name", name, "error", err)
 		writeErr(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if err := s.commitWithAudit(r.Context(), tx); err != nil {
+		slog.ErrorContext(r.Context(), "delete commit failed", "name", name, "error", err)
+		writeErr(w, http.StatusInternalServerError, "audit failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

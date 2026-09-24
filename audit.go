@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net"
@@ -18,6 +19,9 @@ const (
 	actionList   = "list"
 	actionPut    = "put"
 	actionDelete = "delete"
+	// actionOther covers requests under /v1/secrets that match no route
+	// (unsupported method, nested path).
+	actionOther = "other"
 
 	resultAllowed         = "allowed"
 	resultDenied          = "denied"
@@ -37,6 +41,51 @@ type auditEntry struct {
 	Result     string
 	RequestID  string
 	RemoteAddr string
+
+	// written is set when a handler already recorded this request inside
+	// its own transaction (see commitWithAudit). Not a column.
+	written bool
+}
+
+type auditKey struct{}
+
+// commitWithAudit inserts the request's "allowed" audit row inside tx and
+// commits, so a mutation and its record land atomically. Without an audit
+// entry in ctx it refuses to commit: an unaudited write is never allowed.
+func (s *server) commitWithAudit(ctx context.Context, tx *sql.Tx) error {
+	e, _ := ctx.Value(auditKey{}).(*auditEntry)
+	if e == nil {
+		return errors.New("no audit entry in context")
+	}
+	row := *e
+	row.Result = resultAllowed
+	if _, err := tx.ExecContext(ctx, auditInsertSQL,
+		s.now().Unix(), row.TokenName, row.Action, row.SecretName, row.Result, row.RequestID, row.RemoteAddr); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	e.written = true
+	return nil
+}
+
+// unmatched answers requests under /v1/secrets that no route handles:
+// 405 for a known path with an unsupported method, 404 for anything else.
+// It runs after authentication, so unauthenticated callers learn nothing
+// about which paths exist.
+func unmatched(w http.ResponseWriter, r *http.Request) {
+	rest, nested := strings.CutPrefix(r.URL.Path, "/v1/secrets/")
+	switch {
+	case r.URL.Path == "/v1/secrets":
+		w.Header().Set("Allow", "GET")
+	case nested && rest != "" && !strings.Contains(rest, "/"):
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+	default:
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func resultForStatus(status int) string {
@@ -58,10 +107,12 @@ func resultForStatus(status int) string {
 	}
 }
 
-func (s *server) writeAudit(ctx context.Context, e auditEntry) error {
-	_, err := s.db.ExecContext(ctx, `
+const auditInsertSQL = `
 		INSERT INTO audit_log (ts, token_name, action, secret_name, result, request_id, remote_addr)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+func (s *server) writeAudit(ctx context.Context, e auditEntry) error {
+	_, err := s.db.ExecContext(ctx, auditInsertSQL,
 		s.now().Unix(), e.TokenName, e.Action, e.SecretName, e.Result, e.RequestID, e.RemoteAddr)
 	return err
 }
@@ -131,7 +182,9 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 			if ok, wait := s.tokenLimiter.allow(p.name, s.now()); !ok {
 				writeRateLimited(buf, wait)
 			} else {
-				h(buf, r.WithContext(context.WithValue(ctx, principalKey{}, p)))
+				hctx := context.WithValue(ctx, principalKey{}, p)
+				hctx = context.WithValue(hctx, auditKey{}, &e)
+				h(buf, r.WithContext(hctx))
 			}
 		}
 		if buf.status == 0 {
@@ -139,15 +192,18 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 		}
 		e.Result = resultForStatus(buf.status)
 
-		if err := s.writeAudit(ctx, e); err != nil {
-			slog.ErrorContext(ctx, "audit write failed", "error", err,
-				"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
-			// Fail closed for reads: don't hand out data we couldn't
-			// record. A write has already happened by now, so report it
-			// truthfully rather than claim it failed.
-			if e.Result == resultAllowed && (action == actionGet || action == actionList) {
-				writeErr(w, http.StatusInternalServerError, "audit failed")
-				return
+		// A successful write has already recorded itself atomically
+		// (commitWithAudit); everything else is recorded here.
+		if !e.written {
+			if err := s.writeAudit(ctx, e); err != nil {
+				slog.ErrorContext(ctx, "audit write failed", "error", err,
+					"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
+				// Fail closed for reads: don't hand out data we couldn't
+				// record. Successful writes never reach here.
+				if e.Result == resultAllowed && (action == actionGet || action == actionList) {
+					writeErr(w, http.StatusInternalServerError, "audit failed")
+					return
+				}
 			}
 		}
 		slog.InfoContext(ctx, "secret access",

@@ -174,7 +174,7 @@ Prefixes must end in `.` or `_`, so `llm.` matches `llm.openai` but not `llmx.ke
 | Over the rate limit (default 60/min per token; 10/min per IP for failed auth) | `429 {"error":"rate_limited"}` + `Retry-After` |
 | Agent `GET /v1/secrets` | `200`, filtered to its scope |
 
-Every `/v1/secrets` request writes one `audit_log` row: time, token name, action, secret name, result, request ID and client IP. Never values, never tokens. If that row can't be written, reads fail closed with 500.
+Every `/v1/secrets` request writes one `audit_log` row: time, token name, action, secret name, result, request ID and client IP. Never values, never tokens. Requests that match no route (wrong method, nested path) are recorded too, with action `other`. If the row can't be written, reads fail closed with 500, and PUT/DELETE are rolled back and return 500: a write and its audit row commit in the same transaction.
 
 ### Admin commands
 
@@ -189,7 +189,7 @@ sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token revoke --name llm
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush audit --token llm-agent --result denied --since 7d
 ```
 
-`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first and filters on `--token`, `--secret`, `--action get|list|put|delete`, `--result allowed|denied|not_found|unauthenticated|rate_limited|bad_request|error`, `--since` / `--until` (`7d`, `24h` or RFC3339) and `--limit` (default 100).
+`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first and filters on `--token`, `--secret`, `--action get|list|put|delete|other`, `--result allowed|denied|not_found|unauthenticated|rate_limited|bad_request|error`, `--since` / `--until` (`7d`, `24h` or RFC3339) and `--limit` (default 100).
 
 Rotation, backups, audit pruning and moving off `AUTH_TOKEN` are covered in [`deploy/README.md`](deploy/README.md).
 

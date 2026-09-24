@@ -17,7 +17,7 @@ const (
 )
 
 var (
-	auditActions = []string{actionGet, actionList, actionPut, actionDelete}
+	auditActions = []string{actionGet, actionList, actionPut, actionDelete, actionOther}
 	auditResults = []string{resultAllowed, resultDenied, resultNotFound, resultUnauthenticated,
 		resultRateLimited, resultBadRequest, resultError}
 )
