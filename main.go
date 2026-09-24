@@ -181,7 +181,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/secrets", s.secretsRoute(actionList, s.list))
 	mux.HandleFunc("GET /v1/secrets/{name}", s.secretsRoute(actionGet, s.get))
-	mux.HandleFunc("PUT /v1/secrets/{name}", s.secretsRoute(actionPut, requireAdmin(s.put)))
+	mux.HandleFunc("PUT /v1/secrets/{name}", s.secretsRoute(actionPut, requireCreateOrAdmin(s.put)))
 	mux.HandleFunc("DELETE /v1/secrets/{name}", s.secretsRoute(actionDelete, requireAdmin(s.del)))
 	// Catch-alls so every other request under /v1/secrets (wrong method,
 	// nested path) is still authenticated, rate limited and audited
@@ -375,16 +375,28 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Admins upsert. Agents (let through by requireCreateOrAdmin only for
+	// names under a write prefix) may create but never overwrite: DO
+	// NOTHING returns no row for an existing name, which becomes 409.
+	// Doing it in one statement leaves no check-then-insert race.
+	onConflict := `DO UPDATE SET
+			ciphertext = excluded.ciphertext,
+			nonce      = excluded.nonce,
+			updated_at = excluded.updated_at`
+	if principalFrom(r.Context()).role != roleAdmin {
+		onConflict = `DO NOTHING`
+	}
 	var createdAt int64
 	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO secrets (name, ciphertext, nonce, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET
-			ciphertext = excluded.ciphertext,
-			nonce      = excluded.nonce,
-			updated_at = excluded.updated_at
+		ON CONFLICT(name) `+onConflict+`
 		RETURNING created_at
-	`, name, ct, nonce, now, now).Scan(&createdAt)
+	`, name, ct, nonce, now, now).Scan(&createdAt) // #nosec G202 -- onConflict is one of two constants
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusConflict, "already exists")
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(r.Context(), "put exec failed", "name", name, "error", err)
 		writeErr(w, http.StatusInternalServerError, "db error")

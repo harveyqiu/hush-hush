@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cjunks94/hush-hush)](go.mod)
 [![License: MIT](https://img.shields.io/github/license/cjunks94/hush-hush)](LICENSE)
 
-A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest, per-agent tokens with read scopes and an audit log. Made to run on a small Linux VPS under systemd behind Caddy; still runs anywhere a Go binary can run.
+A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-256-GCM at rest, per-agent tokens with read scopes (plus optional create-only write scopes) and an audit log. Made to run on a small Linux VPS under systemd behind Caddy; still runs anywhere a Go binary can run.
 
 Built as a personal portfolio project — small enough to read in one sitting (~3k lines + tests), real enough to actually use.
 
@@ -14,7 +14,7 @@ Built as a personal portfolio project — small enough to read in one sitting (~
 
 A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets across personal projects. You `PUT` a value, you `GET` it back.
 
-It is built for one human and a handful of automated agents (LLM tools, CI jobs, scripts) on one host. You hold an admin token; each agent gets its own read-only token limited to the name prefixes it needs, and every access is logged.
+It is built for one human and a handful of automated agents (LLM tools, CI jobs, scripts) on one host. You hold an admin token; each agent gets its own token limited to the name prefixes it needs (read-only by default, optionally allowed to create new secrets in its own namespace), and every access is logged.
 
 ## What this isn't
 
@@ -46,7 +46,7 @@ The design decisions behind v2 — KDF choice, AEAD choice, wire format, why no 
 
 ### Access control
 
-**One owner, many agents.** Every caller has its own bearer token. Admin tokens read and write everything; agent tokens are read-only and limited to name prefixes. Tokens are stored as SHA-256 hashes and checked against the database on every request, so revocation takes effect immediately. Every `/v1/secrets` request lands in an audit log (names and outcomes, never values). None of this stops someone who can read the database file and master key directly, which is why the server runs as its own Linux user. Details in [Multi-agent access](#multi-agent-access).
+**One owner, many agents.** Every caller has its own bearer token. Admin tokens read and write everything; agent tokens read only names under their prefixes and, if granted write prefixes, may create (never overwrite or delete) names under those. Tokens are stored as SHA-256 hashes and checked against the database on every request, so revocation takes effect immediately. Every `/v1/secrets` request lands in an audit log (names and outcomes, never values). None of this stops someone who can read the database file and master key directly, which is why the server runs as its own Linux user. Details in [Multi-agent access](#multi-agent-access).
 
 ## Architecture
 
@@ -159,16 +159,19 @@ curl -X DELETE $URL/v1/secrets/openai-key \
 | Role | Read | Write / delete | Scope |
 |---|---|---|---|
 | `admin` | yes | yes | every secret |
-| `agent` | yes | never | only names starting with one of its prefixes |
+| `agent` | yes | create-only, never overwrite or delete | reads: names under its `--prefix` list; creates: names under its `--write-prefix` list (none by default) |
 
 Prefixes must end in `.` or `_`, so `llm.` matches `llm.openai` but not `llmx.key`. A lone `*` prefix gives an agent read access to everything, including secrets added later; the CLI makes you retype the token name to confirm it. Name secrets hierarchically (`llm.openai`, `github.deploy_key`) and scoping falls out naturally.
+
+**Create-only writes.** An agent given `--write-prefix crawler.` can `PUT` a *new* name under `crawler.`; if the name already exists it gets `409` and nothing changes, so it can't overwrite (or poison) a value someone else relies on. It can never `DELETE`. Write prefixes follow the same rules as read prefixes, except `*` is not allowed. A write grant doesn't imply read: add the same prefix with `--prefix` if the agent should read back what it creates. Give each agent its own namespace (`token create` warns when write prefixes of two agents overlap).
 
 ### What callers see
 
 | Situation | Response |
 |---|---|
 | Missing, unknown, revoked or expired token | `401 {"error":"unauthorized"}` |
-| Agent `PUT` or `DELETE` | `403 {"error":"forbidden"}` |
+| Agent `DELETE`, or `PUT` outside its write prefixes | `403 {"error":"forbidden"}` |
+| Agent `PUT` under a write prefix, name already exists | `409 {"error":"already exists"}` |
 | Agent `GET` outside its prefixes, whether or not the name exists | `403 {"error":"forbidden"}` |
 | In scope but not stored | `404 {"error":"not found"}` |
 | Over the rate limit (default 60/min per token; 10/min per IP for failed auth) | `429 {"error":"rate_limited"}` + `Retry-After` |
@@ -184,12 +187,14 @@ These run on the server and open the database file directly. They must run as th
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name admin-laptop --role admin
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name llm-agent --role agent --prefix llm. --prefix github. --expires 90d
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token list
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token create --name crawler --role agent --prefix crawler. --write-prefix crawler.
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token update --name llm-agent --prefix llm.
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token update --name crawler --no-write
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token revoke --name llm-agent
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush audit --token llm-agent --result denied --since 7d
 ```
 
-`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first and filters on `--token`, `--secret`, `--action get|list|put|delete|other`, `--result allowed|denied|not_found|unauthenticated|rate_limited|bad_request|error`, `--since` / `--until` (`7d`, `24h` or RFC3339) and `--limit` (default 100).
+`token create` prints the token (`hush_` + 64 hex chars) once; only its hash is kept. Token names are never reused, even after a revoke. `audit` prints newest first and filters on `--token`, `--secret`, `--action get|list|put|delete|other`, `--result allowed|denied|not_found|conflict|unauthenticated|rate_limited|bad_request|error`, `--since` / `--until` (`7d`, `24h` or RFC3339) and `--limit` (default 100).
 
 Rotation, backups, audit pruning and moving off `AUTH_TOKEN` are covered in [`deploy/README.md`](deploy/README.md).
 
@@ -234,7 +239,7 @@ hush list --json                      # machine-readable
 hush delete openai-key                # idempotent
 ```
 
-The CLI works with any token. With an agent token, `hush list` shows only in-scope names, and `hush put` / `hush delete` get a 403.
+The CLI works with any token. With an agent token, `hush list` shows only in-scope names, `hush delete` gets a 403, and `hush put` works only for new names under the token's write prefixes (409 if the name exists, 403 elsewhere).
 
 **Config precedence:** `--url`/`--token` flag > `HUSH_URL`/`HUSH_TOKEN` env > config file. Useful for one-off invocations against a non-default server without re-running `login`.
 
@@ -311,7 +316,7 @@ Tool versions are pinned to specific tags / commit SHAs to defeat `@latest` supp
 - **Client-side encryption requires CLI consumers.** v2 (`hush init` + `hush migrate`) protects against host compromise, but raw-HTTP consumers can't decrypt `hh2:` values. Either every consumer uses the CLI / vendors the vault code, or v2 stays off for that deployment. See [`docs/adr/0001-client-side-encryption.md`](docs/adr/0001-client-side-encryption.md) for the full design discussion.
 - **No passphrase caching.** v2 prompts every command. OS keychain integration (`--remember` flag) is plausible future work, deferred for now to keep the trust surface minimal.
 - **No key-rotation tooling.** If the v1 master key leaks, recovery is manual: rotate, decrypt all rows under old key, re-encrypt under new key, swap env var. If the v2 passphrase leaks: change passphrase via re-init + manual re-puts (no automated re-key yet).
-- **One owner, not a team tool.** Two roles only (admin, read-only agent). No per-human accounts, no groups, no agents that can write.
+- **One owner, not a team tool.** Two roles only (admin, agent). No per-human accounts, no groups. Agents can at most create new secrets under their own write prefixes; they can't overwrite or delete.
 - **Rate limits live in memory** and reset on restart. Fine for one process on one host.
 - **The audit log grows without bound** and has no built-in retention; prune it by hand (see [operational notes](deploy/README.md#9-operational-notes)). It only sees API access: anyone who can read the DB file directly bypasses it.
 - **No web UI / browser extension.**

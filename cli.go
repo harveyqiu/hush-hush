@@ -25,9 +25,10 @@ Usage:
   hush-hush [serve]                 Start the HTTP API (default with no subcommand)
   hush-hush token create --name N --role agent --prefix llm. [--prefix github.] [--expires 90d]
   hush-hush token create --name N --role admin [--expires 90d]
+  hush-hush token create --name N --role agent --write-prefix crawler. [--prefix crawler.]
   hush-hush token list
   hush-hush token revoke --name N
-  hush-hush token update --name N --prefix llm. [--prefix ...]
+  hush-hush token update --name N [--prefix llm. ...] [--write-prefix crawler. ... | --no-write]
   hush-hush audit [--token N] [--secret N] [--action get|list|put|delete|other] [--result R]
                   [--since T] [--until T] [--limit 100]
                                     T is RFC3339 (2026-09-01T00:00:00Z) or an age (24h, 7d)
@@ -199,8 +200,9 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	name := fs.String("name", "", "token name (required)")
 	role := fs.String("role", "", "admin or agent (required)")
 	expires := fs.String("expires", "", "lifetime, e.g. 90d or 12h (default: never)")
-	var prefixes multiFlag
+	var prefixes, writePrefixes multiFlag
 	fs.Var(&prefixes, "prefix", "readable name prefix, repeatable (agent only)")
+	fs.Var(&writePrefixes, "write-prefix", "create-only name prefix, repeatable (agent only)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -210,11 +212,11 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	if *role == "" {
 		return usageErr("token create: --role is required (admin or agent)")
 	}
-	if err := validatePrefixes(*role, prefixes); err != nil {
+	if err := validateGrants(*role, prefixes, writePrefixes); err != nil {
 		return fmt.Errorf("token create: %w", err)
 	}
 	now := time.Now()
-	spec := tokenSpec{name: *name, role: *role, prefixes: prefixes}
+	spec := tokenSpec{name: *name, role: *role, prefixes: prefixes, writePrefixes: writePrefixes}
 	if *expires != "" {
 		d, err := parseExpiry(*expires)
 		if err != nil {
@@ -239,6 +241,9 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 		if err := confirmAllSecrets(*name, stdin, stderr); err != nil {
 			return err
 		}
+	}
+	if err := warnSharedWriteNamespace(db, *name, writePrefixes, stderr); err != nil {
+		return err
 	}
 
 	plaintext, err := generateToken()
@@ -278,7 +283,7 @@ func cmdTokenList(args []string, stdout io.Writer) error {
 	defer db.Close()
 
 	// token_hash is deliberately not selected.
-	rows, err := db.Query(`SELECT name, role, prefixes, revoked_at, expires_at, last_used_at, created_at
+	rows, err := db.Query(`SELECT name, role, prefixes, write_prefixes, revoked_at, expires_at, last_used_at, created_at
 		FROM tokens ORDER BY name`)
 	if err != nil {
 		return err
@@ -286,23 +291,17 @@ func cmdTokenList(args []string, stdout io.Writer) error {
 	defer rows.Close()
 	now := time.Now().Unix()
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tROLE\tPREFIXES\tSTATUS\tEXPIRES\tLAST_USED\tCREATED")
+	fmt.Fprintln(tw, "NAME\tROLE\tPREFIXES\tWRITE\tSTATUS\tEXPIRES\tLAST_USED\tCREATED")
 	for rows.Next() {
-		var name, role, prefJSON string
+		var name, role, prefJSON, writeJSON string
 		var revoked, expires, lastUsed sql.NullInt64
 		var created int64
-		if err := rows.Scan(&name, &role, &prefJSON, &revoked, &expires, &lastUsed, &created); err != nil {
+		if err := rows.Scan(&name, &role, &prefJSON, &writeJSON, &revoked, &expires, &lastUsed, &created); err != nil {
 			return err
 		}
-		var prefixes []string
-		if err := json.Unmarshal([]byte(prefJSON), &prefixes); err != nil {
-			prefixes = []string{"<unreadable>"}
-		}
-		pre := strings.Join(prefixes, ",")
+		pre, write := listGrant(prefJSON), listGrant(writeJSON)
 		if role == roleAdmin {
-			pre = "(all, read/write)"
-		} else if pre == "" {
-			pre = "-"
+			pre, write = "(all)", "(all, overwrite+delete)"
 		}
 		status := "active"
 		switch {
@@ -311,7 +310,7 @@ func cmdTokenList(args []string, stdout io.Writer) error {
 		case expires.Valid && now >= expires.Int64:
 			status = "expired"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, role, pre, status,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, role, pre, write, status,
 			fmtTime(expires), fmtTime(lastUsed), fmtTime(sql.NullInt64{Int64: created, Valid: true}))
 	}
 	if err := rows.Err(); err != nil {
@@ -356,16 +355,21 @@ func cmdTokenRevoke(args []string, stdout io.Writer) error {
 func cmdTokenUpdate(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs, dbPath := newFlagSet("token update")
 	name := fs.String("name", "", "token name (required)")
-	var prefixes multiFlag
-	fs.Var(&prefixes, "prefix", "new prefix set, repeatable; replaces the old set")
+	var prefixes, writePrefixes multiFlag
+	fs.Var(&prefixes, "prefix", "new read prefix set, repeatable; replaces the old set")
+	fs.Var(&writePrefixes, "write-prefix", "new create-only prefix set, repeatable; replaces the old set")
+	noWrite := fs.Bool("no-write", false, "remove all write prefixes")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *name == "" {
 		return usageErr("token update: --name is required")
 	}
-	if err := validatePrefixes(roleAgent, prefixes); err != nil {
-		return fmt.Errorf("token update: %w", err)
+	if len(prefixes) == 0 && len(writePrefixes) == 0 && !*noWrite {
+		return usageErr("token update: give --prefix, --write-prefix or --no-write")
+	}
+	if *noWrite && len(writePrefixes) > 0 {
+		return usageErr("token update: --no-write and --write-prefix are mutually exclusive")
 	}
 	db, err := openAdminDB(*dbPath)
 	if err != nil {
@@ -373,9 +377,10 @@ func cmdTokenUpdate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	}
 	defer db.Close()
 
-	var role string
+	var role, curRead, curWrite string
 	var revoked sql.NullInt64
-	err = db.QueryRow(`SELECT role, revoked_at FROM tokens WHERE name = ?`, *name).Scan(&role, &revoked)
+	err = db.QueryRow(`SELECT role, prefixes, write_prefixes, revoked_at FROM tokens WHERE name = ?`, *name).
+		Scan(&role, &curRead, &curWrite, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("token update: no token named %q", *name)
 	}
@@ -388,18 +393,90 @@ func cmdTokenUpdate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	if revoked.Valid {
 		return fmt.Errorf("token update: %q is revoked", *name)
 	}
+
+	// Each set is replaced only when its flag was given; the other keeps
+	// its current value. An unreadable current value is treated as empty.
+	newRead, newWrite := []string(prefixes), []string(writePrefixes)
+	if len(prefixes) == 0 {
+		newRead = []string{}
+		_ = json.Unmarshal([]byte(curRead), &newRead)
+	}
+	if len(writePrefixes) == 0 && !*noWrite {
+		newWrite = []string{}
+		_ = json.Unmarshal([]byte(curWrite), &newWrite)
+	}
+	if newWrite == nil {
+		newWrite = []string{}
+	}
+	if err := validateGrants(roleAgent, newRead, newWrite); err != nil {
+		return fmt.Errorf("token update: %w", err)
+	}
 	if len(prefixes) == 1 && prefixes[0] == allSecrets {
 		if err := confirmAllSecrets(*name, stdin, stderr); err != nil {
 			return err
 		}
 	}
-	pj, err := json.Marshal([]string(prefixes))
+	if len(writePrefixes) > 0 {
+		if err := warnSharedWriteNamespace(db, *name, writePrefixes, stderr); err != nil {
+			return err
+		}
+	}
+	rj, err := json.Marshal(newRead)
 	if err != nil {
 		return err
 	}
-	if _, err := db.Exec(`UPDATE tokens SET prefixes = ? WHERE name = ?`, string(pj), *name); err != nil {
+	wj, err := json.Marshal(newWrite)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "updated %q: prefixes %s (effective from the next request)\n", *name, strings.Join(prefixes, ","))
+	if _, err := db.Exec(`UPDATE tokens SET prefixes = ?, write_prefixes = ? WHERE name = ?`,
+		string(rj), string(wj), *name); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "updated %q: read %s, write %s (effective from the next request)\n",
+		*name, orDash(strings.Join(newRead, ",")), orDash(strings.Join(newWrite, ",")))
 	return nil
+}
+
+// listGrant renders a stored prefix array for `token list`.
+func listGrant(raw string) string {
+	var p []string
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return "<unreadable>"
+	}
+	return orDash(strings.Join(p, ","))
+}
+
+// warnSharedWriteNamespace warns when a write prefix overlaps another
+// active token's write prefix. Create-only writes can't overwrite, but two
+// agents sharing a namespace can still squat on or plant names the other
+// expects, so a dedicated namespace per agent is the recommended setup.
+func warnSharedWriteNamespace(db *sql.DB, self string, writePrefixes []string, stderr io.Writer) error {
+	if len(writePrefixes) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT name, write_prefixes FROM tokens
+		WHERE name != ? AND role = 'agent' AND revoked_at IS NULL`, self)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var other, raw string
+		if err := rows.Scan(&other, &raw); err != nil {
+			return err
+		}
+		var theirs []string
+		if json.Unmarshal([]byte(raw), &theirs) != nil {
+			continue
+		}
+		for _, mine := range writePrefixes {
+			for _, t := range theirs {
+				if strings.HasPrefix(mine, t) || strings.HasPrefix(t, mine) {
+					fmt.Fprintf(stderr, "WARNING: write prefix %q overlaps %q on token %q; agents sharing a write namespace can create names the other relies on. Prefer one namespace per agent.\n", mine, t, other)
+				}
+			}
+		}
+	}
+	return rows.Err()
 }

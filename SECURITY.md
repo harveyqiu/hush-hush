@@ -32,6 +32,7 @@ This is a deliberately minimal self-hosted tool for one operator and a handful o
 - **Server-side encryption**: the master key is loaded into the server process (systemd credential or env var); host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise.
 - **Agents see plaintext values**: an agent token can read the values under its prefixes. Access control limits *which* secrets an agent gets, not what it does with them.
 - **Same-user bypass**: any process running as the `hush` user (or root) can read the database and master key directly, skipping tokens, prefixes and the audit log. Agents must run as different Linux users; see [`deploy/README.md`](deploy/README.md).
+- **Agent-created secrets**: an agent with write prefixes can create new names there (never overwrite or delete). Anything that reads that namespace should treat those values as agent-supplied.
 - **In-memory rate limits** reset on restart.
 - **Audit `remote_addr` is advisory** for callers on the same host when `TRUST_PROXY_HEADERS=true`, since a local process can talk to the loopback listener and set its own `X-Forwarded-For`.
 - **No token management over HTTP**: tokens are created and revoked only through the local `hush-hush token` CLI, by design.

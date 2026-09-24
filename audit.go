@@ -29,7 +29,9 @@ const (
 	resultUnauthenticated = "unauthenticated"
 	resultRateLimited     = "rate_limited"
 	resultBadRequest      = "bad_request"
-	resultError           = "error"
+	// resultConflict: an agent tried to create a name that already exists.
+	resultConflict = "conflict"
+	resultError    = "error"
 )
 
 // auditEntry is one audit_log row. It never holds a secret value or a
@@ -98,6 +100,8 @@ func resultForStatus(status int) string {
 		return resultDenied
 	case status == http.StatusNotFound:
 		return resultNotFound
+	case status == http.StatusConflict:
+		return resultConflict
 	case status == http.StatusTooManyRequests:
 		return resultRateLimited
 	case status < 500:

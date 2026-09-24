@@ -53,6 +53,11 @@ var migrations = []string{
 	CREATE INDEX audit_log_ts     ON audit_log (ts);
 	CREATE INDEX audit_log_token  ON audit_log (token_name, ts);
 	CREATE INDEX audit_log_secret ON audit_log (secret_name, ts);`,
+
+	// 4: create-only write grants for agent tokens (JSON array, like
+	// prefixes). Existing tokens get none, so nothing gains write access
+	// by upgrading.
+	`ALTER TABLE tokens ADD COLUMN write_prefixes TEXT NOT NULL DEFAULT '[]';`,
 }
 
 // dbDSN is the connection string shared by the server and the admin CLI.

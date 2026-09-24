@@ -28,7 +28,7 @@ Contents:
 
 ## 1. Threat model in one page
 
-hush-hush enforces access in the HTTP API: each caller has its own token, agent tokens are read-only and limited to name prefixes, and every request to `/v1/secrets` is written to an audit log. **All of that only holds for callers that go through the API.**
+hush-hush enforces access in the HTTP API: each caller has its own token, agent tokens are limited to name prefixes (read-only unless given create-only write prefixes), and every request to `/v1/secrets` is written to an audit log. **All of that only holds for callers that go through the API.**
 
 The database file (`/var/lib/hush/hush.db`) and the master key are the real secrets. Anyone who can read both can decrypt every value offline, with no token, no prefix check and no audit row. That includes:
 
@@ -179,9 +179,11 @@ The examples below spell out the full command.
 | Role | Can do |
 |---|---|
 | `admin` | Read, write and delete every secret. For humans. |
-| `agent` | Read only. Only secrets whose names start with one of its prefixes. `PUT` and `DELETE` are always 403. |
+| `agent` | Reads secrets whose names start with one of its `--prefix` values. By default it can't write. With `--write-prefix`, it can create *new* secrets under those prefixes (409 if the name exists, never an overwrite). `DELETE` is always 403. |
 
 Prefixes must end in `.` or `_`, so `llm.` matches `llm.openai` but not `llmx.key`. Naming secrets with a dotted hierarchy (`llm.openai`, `llm.anthropic`, `github.deploy_key`) makes scoping easy.
+
+**Letting an agent create secrets.** Give it its own namespace, for example `--write-prefix crawler.`, and add `--prefix crawler.` too if it should read back what it writes (a write grant doesn't imply read). `*` is not accepted as a write prefix. `token create` and `token update` print a warning when a write prefix overlaps another agent's; sharing a write namespace lets one agent squat on names the other expects.
 
 The special prefix `*` gives an agent read access to every secret, including ones added later. It must be the only prefix, and the CLI asks you to type the token name again to confirm. Avoid it unless you really mean it.
 
@@ -190,7 +192,8 @@ Status codes an agent will see:
 | Situation | Status | Body |
 |---|---|---|
 | Missing, unknown, revoked or expired token | 401 | `{"error":"unauthorized"}` |
-| Agent `PUT`/`DELETE`, or `GET` of a name outside its prefixes (whether or not it exists) | 403 | `{"error":"forbidden"}` |
+| Agent `DELETE`, `PUT` outside its write prefixes, or `GET` of a name outside its read prefixes (whether or not it exists) | 403 | `{"error":"forbidden"}` |
+| Agent `PUT` under a write prefix for a name that already exists | 409 | `{"error":"already exists"}` |
 | Name inside its prefixes but not stored | 404 | `{"error":"not found"}` |
 | Too many requests | 429 | `{"error":"rate_limited"}` plus `Retry-After` |
 
@@ -307,7 +310,7 @@ When done: `unset ADMIN AGENT`.
 sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush token list
 ```
 
-Shows name, role, prefixes, status (`active`, `revoked`, `expired`), expiry, last use and creation time. Token values and hashes are never shown.
+Shows name, role, read prefixes, write prefixes, status (`active`, `revoked`, `expired`), expiry, last use and creation time. Token values and hashes are never shown.
 
 ### 3.7 Change an agent's scope
 
@@ -316,7 +319,16 @@ sudo -u hush env DB_PATH=/var/lib/hush/hush.db \
   hush-hush token update --name llm-agent --prefix llm. --prefix embeddings.
 ```
 
-The new prefix list replaces the old one and applies from the next request.
+Each flag replaces its own list and leaves the other alone: `--prefix` sets the read prefixes, `--write-prefix` the create-only prefixes, and `--no-write` removes all write prefixes. Changes apply from the next request.
+
+```bash
+# let the crawler create new secrets under crawler. (and read them back)
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db \
+  hush-hush token update --name crawler --prefix crawler. --write-prefix crawler.
+# take write access away again
+sudo -u hush env DB_PATH=/var/lib/hush/hush.db \
+  hush-hush token update --name crawler --no-write
+```
 
 ### 3.8 Revoke
 
@@ -353,7 +365,7 @@ Rotate immediately (revoke first, then create) if a token may have leaked.
 
 Every request to `/v1/secrets` writes one row to the `audit_log` table: time, token name, action (`get`, `list`, `put`, `delete`, or `other` for a request that matches no route, such as a wrong method), secret name, result, request ID and client IP. Secret values and tokens are never stored. If the audit row cannot be written, reads fail with 500 instead of returning data that was not recorded, and writes are rolled back: a PUT or DELETE commits in the same transaction as its audit row. `/healthz` is not audited.
 
-Results: `allowed`, `denied` (403), `not_found`, `unauthenticated` (401), `rate_limited` (429), `bad_request`, `error`.
+Results: `allowed`, `denied` (403), `not_found`, `conflict` (409), `unauthenticated` (401), `rate_limited` (429), `bad_request`, `error`.
 
 Query it with the `audit` subcommand (newest first):
 

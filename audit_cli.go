@@ -19,7 +19,7 @@ const (
 var (
 	auditActions = []string{actionGet, actionList, actionPut, actionDelete, actionOther}
 	auditResults = []string{resultAllowed, resultDenied, resultNotFound, resultUnauthenticated,
-		resultRateLimited, resultBadRequest, resultError}
+		resultRateLimited, resultBadRequest, resultConflict, resultError}
 )
 
 // parseAuditTime accepts an RFC3339 timestamp or a duration meaning "that
