@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,9 +54,11 @@ type server struct {
 	// client IP and consumed only by requests that fail authentication.
 	tokenLimiter *rateLimiter
 	ipLimiter    *rateLimiter
-	// trustProxy makes clientIP honour X-Forwarded-For from a loopback
-	// peer (the co-located reverse proxy).
-	trustProxy bool
+	// trustedProxies are the networks whose X-Forwarded-For clientIP
+	// believes (the reverse proxy in front of the container).
+	trustedProxies []*net.IPNet
+	// adminAPI enables /v1/admin/* and the web UI.
+	adminAPI bool
 }
 
 type secretRow struct {
@@ -68,7 +71,7 @@ type secretRow struct {
 // serve runs the HTTP API until SIGINT/SIGTERM. It is the default when the
 // binary is started without a subcommand, preserving v0.1.0 behaviour.
 func serve() {
-	// JSON to stdout — Railway's log viewer parses it; jq-friendly locally.
+	// JSON to stdout: `docker logs` and jq friendly.
 	// contextHandler picks up request_id from r.Context() so handlers don't
 	// have to thread it manually.
 	slog.SetDefault(slog.New(&contextHandler{
@@ -99,7 +102,8 @@ func serve() {
 	clear(cfg.key)
 	s.tokenLimiter = newRateLimiter(cfg.rateLimitPerMinute)
 	s.ipLimiter = newRateLimiter(cfg.unauthRateLimitPerMinute)
-	s.trustProxy = cfg.trustProxy
+	s.trustedProxies = cfg.trustedProxies
+	s.adminAPI = cfg.adminAPI
 	if n, err := s.activeTokenCount(); err != nil {
 		fatal("token count failed", "error", err)
 	} else if n == 0 && cfg.legacyToken == "" {
@@ -122,7 +126,8 @@ func serve() {
 		// key_source says where the key came from; the key itself is
 		// never logged.
 		slog.Info("listening", "addr", cfg.listenAddr, "db_path", dbPath,
-			"key_source", cfg.keySource, "trust_proxy_headers", cfg.trustProxy,
+			"key_source", cfg.keySource, "trusted_proxies", len(cfg.trustedProxies),
+			"admin_api", cfg.adminAPI,
 			"rate_limit_per_minute", cfg.rateLimitPerMinute,
 			"unauth_rate_limit_per_minute", cfg.unauthRateLimitPerMinute)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -159,6 +164,7 @@ func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
 		now:          time.Now,
 		tokenLimiter: newRateLimiter(defaultRateLimitPerMinute),
 		ipLimiter:    newRateLimiter(defaultUnauthRateLimitPerMinute),
+		adminAPI:     true, // matches the ADMIN_API default; serve() applies the config
 	}
 	if legacyToken != "" {
 		slog.Warn("AUTH_TOKEN is deprecated: it is accepted as an admin token but cannot be scoped or revoked individually; create named tokens with `token create` and unset AUTH_TOKEN")
@@ -447,7 +453,7 @@ func (s *server) del(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
-	// Defense in depth against any CDN (Fastly sits in front on Railway)
+	// Defense in depth against any CDN or proxy in front of the server
 	// caching authenticated responses.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
@@ -508,7 +514,7 @@ func (h *contextHandler) Handle(ctx context.Context, r slog.Record) error {
 // correlate a server log line to the response they received.
 //
 // Resolution order:
-//  1. Inbound X-Request-ID (e.g. an upstream Railway / CDN trace) if it
+//  1. Inbound X-Request-ID (e.g. an upstream proxy / CDN trace) if it
 //     passes requestIDRe — preserves end-to-end correlation.
 //  2. Fresh 16-hex-char value from crypto/rand.
 //  3. The string "rng-failed" as a last-resort sentinel so log lines

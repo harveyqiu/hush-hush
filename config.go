@@ -14,12 +14,9 @@ import (
 const (
 	defaultListenAddr = "127.0.0.1:8080"
 	defaultDBPath     = "./hush.db"
-	// credentialKeyFile is the systemd credential name for the master key
-	// (LoadCredential=master_key:/etc/hush/master_key in the unit).
-	credentialKeyFile = "master_key"
 
-	keySourceCredentials = "credentials"
-	keySourceEnv         = "env"
+	keySourceFile = "file"
+	keySourceEnv  = "env"
 )
 
 // config is everything serve() needs from the environment, already
@@ -32,7 +29,10 @@ type config struct {
 	legacyToken              string
 	rateLimitPerMinute       int
 	unauthRateLimitPerMinute int
-	trustProxy               bool
+	// trustedProxies are the peers whose X-Forwarded-For is believed.
+	trustedProxies []*net.IPNet
+	// adminAPI enables /v1/admin/* and the web UI.
+	adminAPI bool
 	// warnings are non-fatal problems for the caller to log; loadConfig
 	// itself stays free of side effects so it can be tested directly.
 	warnings []string
@@ -46,20 +46,23 @@ func loadConfig(getenv func(string) string, readFile func(string) ([]byte, error
 	c := config{
 		dbPath:      defaultDBPath,
 		legacyToken: getenv("AUTH_TOKEN"),
+		listenAddr:  defaultListenAddr,
 	}
 	if v := getenv("DB_PATH"); v != "" {
 		c.dbPath = v
 	}
 
-	addr, warn, err := listenAddr(getenv("LISTEN_ADDR"), getenv("PORT"))
-	if err != nil {
-		return config{}, err
+	if v := getenv("LISTEN_ADDR"); v != "" {
+		if _, _, err := net.SplitHostPort(v); err != nil {
+			return config{}, fmt.Errorf("LISTEN_ADDR: want host:port (e.g. 127.0.0.1:8080), got %q", v)
+		}
+		c.listenAddr = v
 	}
-	c.listenAddr = addr
-	if warn != "" {
-		c.warnings = append(c.warnings, warn)
+	if getenv("PORT") != "" {
+		c.warnings = append(c.warnings, "PORT is ignored; set LISTEN_ADDR (e.g. 0.0.0.0:8080) instead")
 	}
 
+	var err error
 	if c.key, c.keySource, err = masterKey(getenv, readFile); err != nil {
 		return config{}, err
 	}
@@ -71,69 +74,91 @@ func loadConfig(getenv func(string) string, readFile func(string) ([]byte, error
 		return config{}, err
 	}
 
-	if v := getenv("TRUST_PROXY_HEADERS"); v != "" {
+	if getenv("TRUST_PROXY_HEADERS") != "" {
+		// Fail rather than silently change which peers are trusted.
+		return config{}, errors.New("TRUST_PROXY_HEADERS was replaced by TRUSTED_PROXIES; " +
+			"use TRUSTED_PROXIES=127.0.0.1/32 for the old behaviour")
+	}
+	if c.trustedProxies, err = parseTrustedProxies(getenv("TRUSTED_PROXIES")); err != nil {
+		return config{}, err
+	}
+
+	c.adminAPI = true
+	if v := getenv("ADMIN_API"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			return config{}, fmt.Errorf("TRUST_PROXY_HEADERS: must be true or false, got %q", v)
+			return config{}, fmt.Errorf("ADMIN_API: must be true or false, got %q", v)
 		}
-		c.trustProxy = b
+		c.adminAPI = b
 	}
 	return c, nil
 }
 
-// listenAddr resolves the bind address. The default is loopback-only:
-// hush is meant to sit behind a reverse proxy, and binding every interface
-// must be an explicit choice. PORT (set by Railway) is still honoured for
-// the port number but stays on loopback.
-func listenAddr(listen, port string) (addr, warning string, err error) {
-	switch {
-	case listen != "":
-		if _, _, err := net.SplitHostPort(listen); err != nil {
-			return "", "", fmt.Errorf("LISTEN_ADDR: want host:port (e.g. 127.0.0.1:8080), got %q", listen)
+// parseTrustedProxies accepts a comma-separated list of CIDRs or bare IPs.
+// Empty means X-Forwarded-For is never trusted. 0.0.0.0/0 and ::/0 are
+// refused: trusting every peer lets any client pick its own audit address
+// and dodge the failed-auth rate limit.
+func parseTrustedProxies(v string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
-		return listen, "", nil
-	case port != "":
-		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-			return "", "", fmt.Errorf("PORT: want a number between 1 and 65535, got %q", port)
+		if !strings.Contains(part, "/") {
+			ip := net.ParseIP(part)
+			if ip == nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES: %q is not an IP or CIDR", part)
+			}
+			bits := 128
+			if ip.To4() != nil {
+				ip, bits = ip.To4(), 32
+			}
+			part = fmt.Sprintf("%s/%d", ip, bits)
 		}
-		addr = net.JoinHostPort("127.0.0.1", port)
-		return addr, fmt.Sprintf("PORT is set without LISTEN_ADDR: listening on %s (loopback only); "+
-			"to accept external connections set LISTEN_ADDR=0.0.0.0:%s", addr, port), nil
-	default:
-		return defaultListenAddr, "", nil
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXIES: %q is not an IP or CIDR", part)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("TRUSTED_PROXIES: %q would trust every client", part)
+		}
+		out = append(out, n)
 	}
+	return out, nil
 }
 
-// masterKey prefers a systemd credential ($CREDENTIALS_DIRECTORY/master_key)
-// over the MASTER_KEY env var: credentials are not visible in
-// /proc/<pid>/environ or inherited by child processes. A credential file
-// that exists but is unreadable or invalid is an error, not a silent
-// fallback to the env var, so a broken deployment can't quietly use a
-// different key than the operator intended.
+// masterKey reads the key from MASTER_KEY_FILE (a Docker secret such as
+// /run/secrets/master_key) or the MASTER_KEY env var. A file keeps the key
+// out of `docker inspect` and /proc/<pid>/environ. Setting both is an
+// error so a deployment can't quietly use a different key than intended.
 func masterKey(getenv func(string) string, readFile func(string) ([]byte, error)) ([]byte, string, error) {
-	if dir := getenv("CREDENTIALS_DIRECTORY"); dir != "" {
-		path := filepath.Join(dir, credentialKeyFile)
-		raw, err := readFile(path)
-		switch {
-		case err == nil:
-			key, err := decodeKey(string(raw))
-			if err != nil {
-				return nil, "", fmt.Errorf("credential %s: %w", path, err)
+	path, env := getenv("MASTER_KEY_FILE"), getenv("MASTER_KEY")
+	switch {
+	case path != "" && env != "":
+		return nil, "", errors.New("set only one of MASTER_KEY_FILE and MASTER_KEY")
+	case path != "":
+		raw, err := readFile(filepath.Clean(path))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, "", fmt.Errorf("MASTER_KEY_FILE %s: file not found", path)
 			}
-			return key, keySourceCredentials, nil
-		case !errors.Is(err, fs.ErrNotExist):
-			return nil, "", fmt.Errorf("credential %s: %w", path, err)
+			return nil, "", fmt.Errorf("MASTER_KEY_FILE %s: %w", path, err)
 		}
+		key, err := decodeKey(string(raw))
+		if err != nil {
+			return nil, "", fmt.Errorf("MASTER_KEY_FILE %s: %w", path, err)
+		}
+		return key, keySourceFile, nil
+	case env != "":
+		key, err := decodeKey(env)
+		if err != nil {
+			return nil, "", fmt.Errorf("MASTER_KEY: %w", err)
+		}
+		return key, keySourceEnv, nil
+	default:
+		return nil, "", errors.New("master key missing: set MASTER_KEY_FILE (recommended) or MASTER_KEY")
 	}
-	v := getenv("MASTER_KEY")
-	if v == "" {
-		return nil, "", errors.New("master key missing: set MASTER_KEY or provide the systemd credential " + credentialKeyFile)
-	}
-	key, err := decodeKey(v)
-	if err != nil {
-		return nil, "", fmt.Errorf("MASTER_KEY: %w", err)
-	}
-	return key, keySourceEnv, nil
 }
 
 // decodeKey validates base64 and length. The wrapped base64 error carries

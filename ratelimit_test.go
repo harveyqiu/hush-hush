@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -158,11 +159,11 @@ func TestRateLimit_UnauthenticatedPerIP(t *testing.T) {
 	}
 }
 
-// With TRUST_PROXY_HEADERS behind a loopback proxy, each real client gets
+// With TRUSTED_PROXIES covering the proxy, each real client gets
 // its own unauthenticated bucket rather than all sharing the proxy's.
 func TestRateLimit_UnauthBehindProxy(t *testing.T) {
 	s, h, _ := newLimitedServer(t, 60, 1)
-	s.trustProxy = true
+	s.trustedProxies = loopbackNets
 	viaProxy := func(client string) *http.Request {
 		r := reqWithToken("GET", "/v1/secrets", "hush_wrong", nil)
 		r.RemoteAddr = "127.0.0.1:55555"
@@ -188,8 +189,8 @@ func TestNewServer_DefaultLimits(t *testing.T) {
 	if s.tokenLimiter.capacity != 60 || s.ipLimiter.capacity != 10 {
 		t.Errorf("defaults = %v / %v, want 60 / 10", s.tokenLimiter.capacity, s.ipLimiter.capacity)
 	}
-	if s.trustProxy {
-		t.Error("trustProxy defaults to true")
+	if len(s.trustedProxies) != 0 {
+		t.Error("newServer should trust no proxies by default")
 	}
 }
 
@@ -294,7 +295,7 @@ func TestClientIP(t *testing.T) {
 		{name: "rightmost entry wins", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"6.6.6.6, 198.51.100.1"}, want: "198.51.100.1"},
 		{name: "rightmost across header lines", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"6.6.6.6", "7.7.7.7, 198.51.100.1"}, want: "198.51.100.1"},
 		{name: "IPv6 client normalised", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"2001:DB8::0001"}, want: "2001:db8::1"},
-		{name: "spoofed XFF from non-loopback peer ignored", trust: true, remoteAddr: "203.0.113.5:1234", xff: []string{"127.0.0.1"}, want: "203.0.113.5"},
+		{name: "spoofed XFF from untrusted peer ignored", trust: true, remoteAddr: "203.0.113.5:1234", xff: []string{"127.0.0.1"}, want: "203.0.113.5"},
 		{name: "garbage XFF falls back", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"<script>"}, want: "127.0.0.1"},
 		{name: "garbage rightmost does not scan left", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"6.6.6.6, bogus"}, want: "127.0.0.1"},
 		{name: "trailing comma falls back", trust: true, remoteAddr: "127.0.0.1:1", xff: []string{"6.6.6.6,"}, want: "127.0.0.1"},
@@ -310,7 +311,11 @@ func TestClientIP(t *testing.T) {
 			for _, v := range tt.xff {
 				r.Header.Add("X-Forwarded-For", v)
 			}
-			if got := clientIP(r, tt.trust); got != tt.want {
+			var nets []*net.IPNet
+			if tt.trust {
+				nets = loopbackNets
+			}
+			if got := clientIP(r, nets); got != tt.want {
 				t.Errorf("clientIP = %q, want %q", got, tt.want)
 			}
 		})
@@ -328,5 +333,31 @@ func TestIPBucketKey(t *testing.T) {
 		if got := ipBucketKey(ip); got != ip {
 			t.Errorf("ipBucketKey(%q) = %q, want unchanged", ip, got)
 		}
+	}
+}
+
+var loopbackNets = mustNets("127.0.0.0/8,::1")
+
+func mustNets(v string) []*net.IPNet {
+	n, err := parseTrustedProxies(v)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
+
+// Behind Docker the proxy's address is the bridge gateway, not loopback;
+// TRUSTED_PROXIES must cover that case and nothing wider.
+func TestClientIP_DockerBridgeProxy(t *testing.T) {
+	nets := mustNets("172.17.0.1")
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "172.17.0.1:40000"
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	if got := clientIP(r, nets); got != "198.51.100.7" {
+		t.Errorf("via bridge proxy = %q, want forwarded client", got)
+	}
+	r.RemoteAddr = "172.17.0.2:40000" // another container, not the proxy
+	if got := clientIP(r, nets); got != "172.17.0.2" {
+		t.Errorf("from untrusted neighbour = %q, want its own address", got)
 	}
 }

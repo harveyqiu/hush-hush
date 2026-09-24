@@ -44,7 +44,7 @@ reviews:
           * SQL queries are parameterized; no string concat
           * Error messages don't leak internals (DB → "db error",
             crypto → "decrypt failed")
-          * Cache-Control: no-store on every response (Fastly is upstream)
+          * Cache-Control: no-store on every response (a proxy or CDN may be upstream)
           * slog uses ErrorContext so request_id flows from middleware
         Threat model is "personal-dev-secrets" — flag any change that
         broadens it without explicit acknowledgement.

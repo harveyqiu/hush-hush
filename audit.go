@@ -159,7 +159,7 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 		e := auditEntry{
 			Action:     action,
 			RequestID:  requestIDFrom(ctx),
-			RemoteAddr: clientIP(r, s.trustProxy),
+			RemoteAddr: clientIP(r, s.trustedProxies),
 		}
 		// Only well-formed names are recorded; anything else is logged as
 		// empty so arbitrary client bytes never land in the audit table.
@@ -225,15 +225,15 @@ func requestIDFrom(ctx context.Context) string {
 // clientIP returns the caller's IP without the port, or "unknown". It is
 // the audit remote_addr and the key for the unauthenticated rate limit.
 //
-// With trustProxy, X-Forwarded-For is honoured only when the direct peer is
-// loopback, i.e. the co-located reverse proxy; from anyone else the header
-// is attacker-controlled and ignored. Only the rightmost entry is used:
-// Caddy appends the address it saw, and everything to its left came from
+// X-Forwarded-For is honoured only when the direct peer is inside one of
+// the trusted proxy networks; from anyone else the header is
+// attacker-controlled and ignored. Only the rightmost entry is used: the
+// proxy appends the address it saw, and everything to its left came from
 // the client. If that entry is not a valid IP we fall back to the peer
 // rather than scanning further left into client-supplied values.
-func clientIP(r *http.Request, trustProxy bool) string {
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	peer := parseIP(r.RemoteAddr)
-	if trustProxy && peer != nil && peer.IsLoopback() {
+	if peer != nil && ipInNets(peer, trusted) {
 		if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
 			last := xff[len(xff)-1]
 			if i := strings.LastIndexByte(last, ','); i >= 0 {
@@ -248,6 +248,15 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		return "unknown"
 	}
 	return peer.String()
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseIP accepts "host:port" or a bare IP. RemoteAddr is always set by

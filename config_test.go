@@ -13,8 +13,8 @@ import (
 
 var (
 	envKeyB64  = base64.StdEncoding.EncodeToString(testKey())
-	credKey    = bytes.Repeat([]byte{0xAB}, 32)
-	credKeyB64 = base64.StdEncoding.EncodeToString(credKey)
+	fileKey    = bytes.Repeat([]byte{0xAB}, 32)
+	fileKeyB64 = base64.StdEncoding.EncodeToString(fileKey)
 )
 
 // fakeEnv returns getenv/readFile stand-ins backed by maps, so loadConfig
@@ -50,8 +50,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if c.rateLimitPerMinute != 60 || c.unauthRateLimitPerMinute != 10 {
 		t.Errorf("rate limits = %d/%d, want 60/10", c.rateLimitPerMinute, c.unauthRateLimitPerMinute)
 	}
-	if c.trustProxy {
-		t.Error("trustProxy defaults to true, want false")
+	if len(c.trustedProxies) != 0 {
+		t.Error("no proxy should be trusted by default")
+	}
+	if !c.adminAPI {
+		t.Error("admin API should default to on")
 	}
 	if c.legacyToken != "" || len(c.warnings) != 0 {
 		t.Errorf("legacyToken=%q warnings=%v, want none", c.legacyToken, c.warnings)
@@ -63,21 +66,14 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 func TestLoadConfig_ListenAddr(t *testing.T) {
 	tests := []struct {
-		name     string
-		listen   string
-		port     string
-		want     string
-		wantWarn bool
-		wantErr  bool
+		name, listen, port, want string
+		wantWarn, wantErr        bool
 	}{
 		{name: "default is loopback", want: "127.0.0.1:8080"},
-		{name: "PORT alone stays on loopback", port: "3000", want: "127.0.0.1:3000", wantWarn: true},
 		{name: "LISTEN_ADDR honoured", listen: "0.0.0.0:9000", want: "0.0.0.0:9000"},
-		{name: "LISTEN_ADDR wins over PORT", listen: "127.0.0.1:9000", port: "3000", want: "127.0.0.1:9000"},
 		{name: "IPv6 LISTEN_ADDR", listen: "[::1]:8080", want: "[::1]:8080"},
+		{name: "PORT is ignored with a warning", port: "3000", want: "127.0.0.1:8080", wantWarn: true},
 		{name: "LISTEN_ADDR without port", listen: "0.0.0.0", wantErr: true},
-		{name: "PORT not a number", port: "http", wantErr: true},
-		{name: "PORT out of range", port: "70000", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -95,20 +91,15 @@ func TestLoadConfig_ListenAddr(t *testing.T) {
 			if c.listenAddr != tt.want {
 				t.Errorf("listenAddr = %q, want %q", c.listenAddr, tt.want)
 			}
-			gotWarn := len(c.warnings) > 0
-			if gotWarn != tt.wantWarn {
-				t.Fatalf("warnings = %v, want warning=%v", c.warnings, tt.wantWarn)
-			}
-			if gotWarn && !strings.Contains(c.warnings[0], "LISTEN_ADDR=0.0.0.0:"+tt.port) {
-				t.Errorf("warning %q should tell the operator how to expose the port", c.warnings[0])
+			if (len(c.warnings) > 0) != tt.wantWarn {
+				t.Errorf("warnings = %v, want warning=%v", c.warnings, tt.wantWarn)
 			}
 		})
 	}
 }
 
 func TestLoadConfig_MasterKey(t *testing.T) {
-	const dir = "/run/credentials/hush.service"
-	credPath := filepath.Join(dir, "master_key")
+	const path = "/run/secrets/master_key"
 	tests := []struct {
 		name       string
 		env        map[string]string
@@ -117,66 +108,20 @@ func TestLoadConfig_MasterKey(t *testing.T) {
 		wantSource string
 		wantErr    string
 	}{
-		{
-			name:       "env only",
-			env:        map[string]string{"MASTER_KEY": envKeyB64},
-			wantKey:    testKey(),
-			wantSource: keySourceEnv,
-		},
-		{
-			name:       "credential preferred over env",
-			env:        map[string]string{"MASTER_KEY": envKeyB64, "CREDENTIALS_DIRECTORY": dir},
-			files:      map[string]string{credPath: credKeyB64},
-			wantKey:    credKey,
-			wantSource: keySourceCredentials,
-		},
-		{
-			name:       "credential whitespace trimmed",
-			env:        map[string]string{"CREDENTIALS_DIRECTORY": dir},
-			files:      map[string]string{credPath: "  " + credKeyB64 + "\n"},
-			wantKey:    credKey,
-			wantSource: keySourceCredentials,
-		},
-		{
-			name:       "credentials dir without master_key falls back to env",
-			env:        map[string]string{"MASTER_KEY": envKeyB64, "CREDENTIALS_DIRECTORY": dir},
-			wantKey:    testKey(),
-			wantSource: keySourceEnv,
-		},
-		{
-			name:    "credentials dir without master_key and no env",
-			env:     map[string]string{"CREDENTIALS_DIRECTORY": dir},
-			wantErr: "master key missing",
-		},
-		{
-			name:    "neither source",
-			env:     map[string]string{},
-			wantErr: "master key missing",
-		},
-		{
-			// A broken credential must not silently fall back to a
-			// different key from the environment.
-			name:    "bad base64 credential does not fall back",
-			env:     map[string]string{"MASTER_KEY": envKeyB64, "CREDENTIALS_DIRECTORY": dir},
-			files:   map[string]string{credPath: "not*base64!"},
-			wantErr: "invalid base64",
-		},
-		{
-			name:    "short credential",
-			env:     map[string]string{"CREDENTIALS_DIRECTORY": dir},
-			files:   map[string]string{credPath: base64.StdEncoding.EncodeToString(make([]byte, 16))},
-			wantErr: "must decode to 32 bytes, got 16",
-		},
-		{
-			name:    "env bad base64",
-			env:     map[string]string{"MASTER_KEY": "%%%"},
-			wantErr: "MASTER_KEY: invalid base64",
-		},
-		{
-			name:    "env wrong length",
-			env:     map[string]string{"MASTER_KEY": base64.StdEncoding.EncodeToString(make([]byte, 33))},
-			wantErr: "MASTER_KEY: must decode to 32 bytes, got 33",
-		},
+		{name: "env", env: map[string]string{"MASTER_KEY": envKeyB64}, wantKey: testKey(), wantSource: keySourceEnv},
+		{name: "file, trailing newline trimmed", env: map[string]string{"MASTER_KEY_FILE": path},
+			files: map[string]string{path: fileKeyB64 + "\n"}, wantKey: fileKey, wantSource: keySourceFile},
+		{name: "both set is ambiguous", env: map[string]string{"MASTER_KEY_FILE": path, "MASTER_KEY": envKeyB64},
+			files: map[string]string{path: fileKeyB64}, wantErr: "only one"},
+		{name: "file missing", env: map[string]string{"MASTER_KEY_FILE": path}, wantErr: "not found"},
+		{name: "file bad base64", env: map[string]string{"MASTER_KEY_FILE": path},
+			files: map[string]string{path: "!!!"}, wantErr: "invalid base64"},
+		{name: "file wrong length", env: map[string]string{"MASTER_KEY_FILE": path},
+			files: map[string]string{path: base64.StdEncoding.EncodeToString([]byte("short"))}, wantErr: "32 bytes"},
+		{name: "env wrong length", env: map[string]string{"MASTER_KEY": base64.StdEncoding.EncodeToString([]byte("short"))}, wantErr: "32 bytes"},
+		{name: "nothing set", env: map[string]string{}, wantErr: "master key missing"},
+		{name: "systemd credentials no longer read", env: map[string]string{"CREDENTIALS_DIRECTORY": "/run/credentials/x"},
+			files: map[string]string{"/run/credentials/x/master_key": fileKeyB64}, wantErr: "master key missing"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,15 +136,15 @@ func TestLoadConfig_MasterKey(t *testing.T) {
 				t.Fatalf("loadConfig: %v", err)
 			}
 			if !bytes.Equal(c.key, tt.wantKey) || c.keySource != tt.wantSource {
-				t.Errorf("source = %q (want %q), key match = %v", c.keySource, tt.wantSource, bytes.Equal(c.key, tt.wantKey))
+				t.Errorf("source = %q, key match = %v", c.keySource, bytes.Equal(c.key, tt.wantKey))
 			}
 		})
 	}
 }
 
-// An unreadable credential (as opposed to an absent one) is an error.
-func TestLoadConfig_CredentialReadError(t *testing.T) {
-	getenv, _ := fakeEnv(map[string]string{"MASTER_KEY": envKeyB64, "CREDENTIALS_DIRECTORY": "/creds"}, nil)
+// An unreadable key file (as opposed to an absent one) is an error.
+func TestLoadConfig_KeyFileReadError(t *testing.T) {
+	getenv, _ := fakeEnv(map[string]string{"MASTER_KEY_FILE": "/run/secrets/master_key"}, nil)
 	readFile := func(string) ([]byte, error) { return nil, fs.ErrPermission }
 	if _, err := loadConfig(getenv, readFile); !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("err = %v, want permission error", err)
@@ -207,18 +152,18 @@ func TestLoadConfig_CredentialReadError(t *testing.T) {
 }
 
 // Exercises the real os.ReadFile path, as serve() uses it.
-func TestLoadConfig_CredentialFileOnDisk(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "master_key"), []byte(credKeyB64+"\n"), 0o600); err != nil {
+func TestLoadConfig_KeyFileOnDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "master_key")
+	if err := os.WriteFile(path, []byte(fileKeyB64+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	getenv, _ := fakeEnv(map[string]string{"CREDENTIALS_DIRECTORY": dir}, nil)
+	getenv, _ := fakeEnv(map[string]string{"MASTER_KEY_FILE": path}, nil)
 	c, err := loadConfig(getenv, os.ReadFile)
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if !bytes.Equal(c.key, credKey) || c.keySource != keySourceCredentials {
-		t.Errorf("source = %q, key match = %v", c.keySource, bytes.Equal(c.key, credKey))
+	if !bytes.Equal(c.key, fileKey) || c.keySource != keySourceFile {
+		t.Errorf("source = %q, key match = %v", c.keySource, bytes.Equal(c.key, fileKey))
 	}
 }
 
@@ -277,29 +222,49 @@ func TestLoadConfig_RateLimits(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_TrustProxyHeaders(t *testing.T) {
+func TestLoadConfig_TrustedProxies(t *testing.T) {
 	tests := []struct {
 		val     string
-		want    bool
+		want    int
 		wantErr bool
 	}{
-		{"", false, false},
-		{"false", false, false},
-		{"true", true, false},
-		{"1", true, false},
-		{"yes", false, true},
+		{"", 0, false},
+		{"172.17.0.1", 1, false},
+		{"172.16.0.0/12, 10.0.0.0/8", 2, false},
+		{"::1, fd00::/8", 2, false},
+		{"0.0.0.0/0", 0, true},
+		{"::/0", 0, true},
+		{"not-an-ip", 0, true},
+		{"10.0.0.0/33", 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.val, func(t *testing.T) {
-			env := map[string]string{"MASTER_KEY": envKeyB64, "TRUST_PROXY_HEADERS": tt.val}
+			env := map[string]string{"MASTER_KEY": envKeyB64, "TRUSTED_PROXIES": tt.val}
 			c, err := loadConfig(fakeEnv(env, nil))
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if err == nil && c.trustProxy != tt.want {
-				t.Errorf("trustProxy = %v, want %v", c.trustProxy, tt.want)
+			if err == nil && len(c.trustedProxies) != tt.want {
+				t.Errorf("got %d networks, want %d", len(c.trustedProxies), tt.want)
 			}
 		})
+	}
+	// The removed variable must not be silently ignored.
+	env := map[string]string{"MASTER_KEY": envKeyB64, "TRUST_PROXY_HEADERS": "true"}
+	if _, err := loadConfig(fakeEnv(env, nil)); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXIES") {
+		t.Errorf("TRUST_PROXY_HEADERS: err = %v, want a pointer to TRUSTED_PROXIES", err)
+	}
+}
+
+func TestLoadConfig_AdminAPI(t *testing.T) {
+	for val, want := range map[string]bool{"": true, "true": true, "false": false, "0": false} {
+		c := mustLoad(t, map[string]string{"MASTER_KEY": envKeyB64, "ADMIN_API": val}, nil)
+		if c.adminAPI != want {
+			t.Errorf("ADMIN_API=%q: got %v, want %v", val, c.adminAPI, want)
+		}
+	}
+	if _, err := loadConfig(fakeEnv(map[string]string{"MASTER_KEY": envKeyB64, "ADMIN_API": "maybe"}, nil)); err == nil {
+		t.Error("ADMIN_API=maybe should be rejected")
 	}
 }
 
