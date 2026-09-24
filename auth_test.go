@@ -329,3 +329,10 @@ func TestOpenDB_CreatesFile0600(t *testing.T) {
 		t.Errorf("new db file mode = %#o, want 0600", fi)
 	}
 }
+
+func decodeJSON(t *testing.T, b []byte, v any) {
+	t.Helper()
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatalf("decode %q: %v", b, err)
+	}
+}

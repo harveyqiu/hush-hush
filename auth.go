@@ -142,3 +142,20 @@ func insertToken(ctx context.Context, db *sql.DB, spec tokenSpec, plaintext stri
 		spec.name, h[:], spec.role, string(pj), exp, now.Unix())
 	return err
 }
+
+func principalFrom(ctx context.Context) *principal {
+	p, _ := ctx.Value(principalKey{}).(*principal)
+	return p
+}
+
+// requireAdmin gates mutating routes. It runs before any request parsing or
+// database access so an agent learns nothing beyond "not allowed".
+func requireAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p := principalFrom(r.Context()); p == nil || p.role != roleAdmin {
+			writeErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		h(w, r)
+	}
+}

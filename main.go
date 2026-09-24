@@ -160,8 +160,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/secrets", s.requireAuth(s.list))
 	mux.HandleFunc("GET /v1/secrets/{name}", s.requireAuth(s.get))
-	mux.HandleFunc("PUT /v1/secrets/{name}", s.requireAuth(s.put))
-	mux.HandleFunc("DELETE /v1/secrets/{name}", s.requireAuth(s.del))
+	mux.HandleFunc("PUT /v1/secrets/{name}", s.requireAuth(requireAdmin(s.put)))
+	mux.HandleFunc("DELETE /v1/secrets/{name}", s.requireAuth(requireAdmin(s.del)))
 	return mux
 }
 
@@ -357,8 +357,8 @@ func (s *server) del(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid name")
 		return
 	}
-	// Idempotent: a network retry of a successful DELETE should not
-	// surface as an error. We don't distinguish "deleted" from "wasn't
+	// Idempotent (admin only; agents are stopped by requireAdmin): a
+	// network retry of a successful DELETE should not surface as an error. We don't distinguish "deleted" from "wasn't
 	// there" — both end states are identical.
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM secrets WHERE name = ?`, name); err != nil {
 		slog.ErrorContext(r.Context(), "delete exec failed", "name", name, "error", err)
