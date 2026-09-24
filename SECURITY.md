@@ -27,12 +27,14 @@ This is an active personal project; only the latest commit on `main` is supporte
 
 ## Out of scope
 
-This is a deliberately minimal single-user personal tool. The following are documented trade-offs in the [threat model](README.md#threat-model), not vulnerabilities:
+This is a deliberately minimal self-hosted tool for one operator and a handful of agents. The following are documented trade-offs in the [threat model](README.md#threat-model), not vulnerabilities:
 
-- **Server-side encryption** — the master key sits in a process env var; host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise. Use Vaultwarden / Bitwarden if you need client-side crypto.
-- **No rate limiting** beyond Railway's edge default. The 256-bit `AUTH_TOKEN` makes online brute force infeasible at any sensible request rate, but a determined attacker with sustained access could probe forever.
-- **No audit log** of read access.
-- **Single-user** — one bearer token, no users / ACLs / rotation.
+- **Server-side encryption**: the master key is loaded into the server process (systemd credential or env var); host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise.
+- **Agents see plaintext values**: an agent token can read the values under its prefixes. Access control limits *which* secrets an agent gets, not what it does with them.
+- **Same-user bypass**: any process running as the `hush` user (or root) can read the database and master key directly, skipping tokens, prefixes and the audit log. Agents must run as different Linux users; see [`deploy/README.md`](deploy/README.md).
+- **In-memory rate limits** reset on restart.
+- **Audit `remote_addr` is advisory** for callers on the same host when `TRUST_PROXY_HEADERS=true`, since a local process can talk to the loopback listener and set its own `X-Forwarded-For`.
+- **No token management over HTTP**: tokens are created and revoked only through the local `hush-hush token` CLI, by design.
 
 If your use case requires any of those properties, please pick a different tool — see the [README's "What this isn't" section](README.md#what-this-isnt).
 
