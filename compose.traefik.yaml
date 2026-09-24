@@ -1,0 +1,50 @@
+# Traefik variant: layer this on top of compose.yaml, with Traefik running
+# as a container on the same host (same Docker daemon).
+#
+#   docker network create --internal --subnet 172.29.54.0/24 hush-edge   # once
+#   cp .env.example .env    # then edit the values
+#   docker compose up -d    # .env sets COMPOSE_FILE to include this file
+#
+# hush-edge is a private, internal network shared only by Traefik and
+# hush-hush: no other container can reach port 8080 (so nothing bypasses the
+# admin IP allowlist below), X-Forwarded-For is trusted from that subnet
+# only, and the hush container has no route to the internet.
+# Full guide: docs/docker.md, section 2.5.
+
+services:
+  hush:
+    # No host port: Traefik reaches the container over hush-edge.
+    ports: !reset []
+    environment:
+      # Only Traefik and hush itself are on hush-edge, so trusting the
+      # subnet trusts exactly Traefik.
+      TRUSTED_PROXIES: ${HUSH_EDGE_SUBNET:-172.29.54.0/24}
+    networks: !override
+      - hush-edge
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: hush-edge
+
+      # Agent-facing API (/v1/secrets, /healthz): reachable from anywhere
+      # Traefik serves; every call still needs a token.
+      traefik.http.routers.hush.rule: Host(`${HUSH_HOST:?set HUSH_HOST in .env}`)
+      traefik.http.routers.hush.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.hush.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.hush.service: hush
+
+      # Admin surface (web UI, /v1/admin): only from the addresses in
+      # HUSH_ADMIN_ALLOW, e.g. your VPN or home IP. Higher priority than
+      # the router above, so these paths never fall through to it.
+      traefik.http.routers.hush-admin.rule: Host(`${HUSH_HOST}`) && (Path(`/`) || PathPrefix(`/ui`) || PathPrefix(`/v1/admin`))
+      traefik.http.routers.hush-admin.priority: "100"
+      traefik.http.routers.hush-admin.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.hush-admin.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.routers.hush-admin.middlewares: hush-admin-allow
+      traefik.http.routers.hush-admin.service: hush
+      traefik.http.middlewares.hush-admin-allow.ipallowlist.sourcerange: ${HUSH_ADMIN_ALLOW:?set HUSH_ADMIN_ALLOW in .env}
+
+      traefik.http.services.hush.loadbalancer.server.port: "8080"
+
+networks:
+  hush-edge:
+    external: true

@@ -251,10 +251,7 @@ func TestMaybeDecrypt_TableDriven(t *testing.T) {
 	for i := range key {
 		key[i] = 0x42
 	}
-	encrypted, err := encryptWireFormat(key, []byte("real-value"), []byte("foo"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	encrypted := encryptWireFormat(key, []byte("real-value"), []byte("foo"))
 
 	cases := []struct {
 		desc       string

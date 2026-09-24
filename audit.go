@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net"
@@ -18,6 +19,9 @@ const (
 	actionList   = "list"
 	actionPut    = "put"
 	actionDelete = "delete"
+	// actionOther covers requests under /v1/secrets that match no route
+	// (unsupported method, nested path).
+	actionOther = "other"
 
 	resultAllowed         = "allowed"
 	resultDenied          = "denied"
@@ -25,7 +29,9 @@ const (
 	resultUnauthenticated = "unauthenticated"
 	resultRateLimited     = "rate_limited"
 	resultBadRequest      = "bad_request"
-	resultError           = "error"
+	// resultConflict: an agent tried to create a name that already exists.
+	resultConflict = "conflict"
+	resultError    = "error"
 )
 
 // auditEntry is one audit_log row. It never holds a secret value or a
@@ -37,6 +43,60 @@ type auditEntry struct {
 	Result     string
 	RequestID  string
 	RemoteAddr string
+
+	// written is set when a handler already recorded this request inside
+	// its own transaction (see commitWithAudit). Not a column.
+	written bool
+}
+
+type auditKey struct{}
+
+// setAuditTarget records the object a request acts on when it isn't in the
+// URL path (e.g. the name of a token being created from a JSON body). Only
+// well-formed names are kept, as for path names.
+func setAuditTarget(ctx context.Context, name string) {
+	if e, _ := ctx.Value(auditKey{}).(*auditEntry); e != nil && nameRe.MatchString(name) {
+		e.SecretName = name
+	}
+}
+
+// commitWithAudit inserts the request's "allowed" audit row inside tx and
+// commits, so a mutation and its record land atomically. Without an audit
+// entry in ctx it refuses to commit: an unaudited write is never allowed.
+func (s *server) commitWithAudit(ctx context.Context, tx *sql.Tx) error {
+	e, _ := ctx.Value(auditKey{}).(*auditEntry)
+	if e == nil {
+		return errors.New("no audit entry in context")
+	}
+	row := *e
+	row.Result = resultAllowed
+	if _, err := tx.ExecContext(ctx, auditInsertSQL,
+		s.now().Unix(), row.TokenName, row.Action, row.SecretName, row.Result, row.RequestID, row.RemoteAddr); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	e.written = true
+	return nil
+}
+
+// unmatched answers requests under /v1/secrets that no route handles:
+// 405 for a known path with an unsupported method, 404 for anything else.
+// It runs after authentication, so unauthenticated callers learn nothing
+// about which paths exist.
+func unmatched(w http.ResponseWriter, r *http.Request) {
+	rest, nested := strings.CutPrefix(r.URL.Path, "/v1/secrets/")
+	switch {
+	case r.URL.Path == "/v1/secrets":
+		w.Header().Set("Allow", "GET")
+	case nested && rest != "" && !strings.Contains(rest, "/"):
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+	default:
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func resultForStatus(status int) string {
@@ -49,6 +109,8 @@ func resultForStatus(status int) string {
 		return resultDenied
 	case status == http.StatusNotFound:
 		return resultNotFound
+	case status == http.StatusConflict:
+		return resultConflict
 	case status == http.StatusTooManyRequests:
 		return resultRateLimited
 	case status < 500:
@@ -58,10 +120,12 @@ func resultForStatus(status int) string {
 	}
 }
 
-func (s *server) writeAudit(ctx context.Context, e auditEntry) error {
-	_, err := s.db.ExecContext(ctx, `
+const auditInsertSQL = `
 		INSERT INTO audit_log (ts, token_name, action, secret_name, result, request_id, remote_addr)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+func (s *server) writeAudit(ctx context.Context, e auditEntry) error {
+	_, err := s.db.ExecContext(ctx, auditInsertSQL,
 		s.now().Unix(), e.TokenName, e.Action, e.SecretName, e.Result, e.RequestID, e.RemoteAddr)
 	return err
 }
@@ -96,15 +160,17 @@ func (b *bufferedResponse) flushTo(w http.ResponseWriter) {
 	_, _ = w.Write(b.body.Bytes())
 }
 
-// secretsRoute is the single entry point for every /v1/secrets request:
-// authentication, then the handler, then exactly one audit row.
+// secretsRoute is the single entry point for every API request under
+// /v1/secrets and /v1/admin: authentication, rate limit, the handler, then
+// exactly one audit row. For admin token routes the {name} path value (the
+// target token) is what lands in secret_name.
 func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		e := auditEntry{
 			Action:     action,
 			RequestID:  requestIDFrom(ctx),
-			RemoteAddr: clientIP(r, s.trustProxy),
+			RemoteAddr: clientIP(r, s.trustedProxies),
 		}
 		// Only well-formed names are recorded; anything else is logged as
 		// empty so arbitrary client bytes never land in the audit table.
@@ -131,7 +197,9 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 			if ok, wait := s.tokenLimiter.allow(p.name, s.now()); !ok {
 				writeRateLimited(buf, wait)
 			} else {
-				h(buf, r.WithContext(context.WithValue(ctx, principalKey{}, p)))
+				hctx := context.WithValue(ctx, principalKey{}, p)
+				hctx = context.WithValue(hctx, auditKey{}, &e)
+				h(buf, r.WithContext(hctx))
 			}
 		}
 		if buf.status == 0 {
@@ -139,15 +207,18 @@ func (s *server) secretsRoute(action string, h http.HandlerFunc) http.HandlerFun
 		}
 		e.Result = resultForStatus(buf.status)
 
-		if err := s.writeAudit(ctx, e); err != nil {
-			slog.ErrorContext(ctx, "audit write failed", "error", err,
-				"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
-			// Fail closed for reads: don't hand out data we couldn't
-			// record. A write has already happened by now, so report it
-			// truthfully rather than claim it failed.
-			if e.Result == resultAllowed && (action == actionGet || action == actionList) {
-				writeErr(w, http.StatusInternalServerError, "audit failed")
-				return
+		// A successful write has already recorded itself atomically
+		// (commitWithAudit); everything else is recorded here.
+		if !e.written {
+			if err := s.writeAudit(ctx, e); err != nil {
+				slog.ErrorContext(ctx, "audit write failed", "error", err,
+					"token_name", e.TokenName, "action", e.Action, "secret_name", e.SecretName, "result", e.Result)
+				// Fail closed for reads: don't hand out data we couldn't
+				// record. Successful writes never reach here.
+				if e.Result == resultAllowed && readsData(action) {
+					writeErr(w, http.StatusInternalServerError, "audit failed")
+					return
+				}
 			}
 		}
 		slog.InfoContext(ctx, "secret access",
@@ -165,15 +236,15 @@ func requestIDFrom(ctx context.Context) string {
 // clientIP returns the caller's IP without the port, or "unknown". It is
 // the audit remote_addr and the key for the unauthenticated rate limit.
 //
-// With trustProxy, X-Forwarded-For is honoured only when the direct peer is
-// loopback, i.e. the co-located reverse proxy; from anyone else the header
-// is attacker-controlled and ignored. Only the rightmost entry is used:
-// Caddy appends the address it saw, and everything to its left came from
+// X-Forwarded-For is honoured only when the direct peer is inside one of
+// the trusted proxy networks; from anyone else the header is
+// attacker-controlled and ignored. Only the rightmost entry is used: the
+// proxy appends the address it saw, and everything to its left came from
 // the client. If that entry is not a valid IP we fall back to the peer
 // rather than scanning further left into client-supplied values.
-func clientIP(r *http.Request, trustProxy bool) string {
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	peer := parseIP(r.RemoteAddr)
-	if trustProxy && peer != nil && peer.IsLoopback() {
+	if peer != nil && ipInNets(peer, trusted) {
 		if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
 			last := xff[len(xff)-1]
 			if i := strings.LastIndexByte(last, ','); i >= 0 {
@@ -190,6 +261,15 @@ func clientIP(r *http.Request, trustProxy bool) string {
 	return peer.String()
 }
 
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseIP accepts "host:port" or a bare IP. RemoteAddr is always set by
 // net/http; the bare form keeps odd test or proxy values well-formed.
 func parseIP(addr string) net.IP {
@@ -198,4 +278,14 @@ func parseIP(addr string) net.IP {
 		host = addr
 	}
 	return net.ParseIP(strings.TrimSpace(host))
+}
+
+// readsData reports actions that return stored data. Their responses are
+// withheld when the audit row can't be written.
+func readsData(action string) bool {
+	switch action {
+	case actionGet, actionList, actionTokenList, actionAuditRead:
+		return true
+	}
+	return false
 }

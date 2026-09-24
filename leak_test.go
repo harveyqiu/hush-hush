@@ -21,12 +21,11 @@ const (
 	markerBogus      = "hush_MARKER-TOKEN-BOGUS"
 	markerRevoked    = "hush_MARKER-TOKEN-REVOKED"
 	markerExpired    = "hush_MARKER-TOKEN-EXPIRED"
-	markerLegacy     = "MARKER-TOKEN-LEGACY"
 	markerSubstring  = "MARKER"
 )
 
 var allMarkers = []string{markerValue, markerOtherValue, markerAdmin, markerAgent,
-	markerBogus, markerRevoked, markerExpired, markerLegacy}
+	markerBogus, markerRevoked, markerExpired}
 
 // assertNoMarkers fails if text contains any marker, or the SHA-256 hex of
 // any marker token (a hash in a log is almost as useful to an attacker
@@ -64,11 +63,6 @@ func TestLeak_NoSecretsOrTokensAnywhere(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE tokens SET revoked_at = ? WHERE name = 'leak-revoked'`, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := newServer(s.db, testKey(), markerLegacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lh := withRequestID(legacy.routes())
 
 	type step struct {
 		desc     string
@@ -105,10 +99,8 @@ func TestLeak_NoSecretsOrTokensAnywhere(t *testing.T) {
 		{"revoked token", h, "GET", "/v1/secrets/llm.key", bearer(markerRevoked), "", "", 401},
 		{"expired token", h, "GET", "/v1/secrets/llm.key", bearer(markerExpired), "", "", 401},
 		{"no token", h, "GET", "/v1/secrets/llm.key", "", "", "", 401},
-		{"legacy get", lh, "GET", "/v1/secrets/llm.key", bearer(markerLegacy), "", "", 200},
-		{"legacy put", lh, "PUT", "/v1/secrets/llm.legacy", bearer(markerLegacy), valueBody, "application/json", 200},
-		{"legacy wrong token", lh, "GET", "/v1/secrets/llm.key", bearer(markerLegacy + "x"), "", "", 401},
-		{"admin delete", h, "DELETE", "/v1/secrets/llm.legacy", bearer(markerAdmin), "", "", 204},
+		{"admin put 2", h, "PUT", "/v1/secrets/llm.second", bearer(markerAdmin), valueBody, "application/json", 200},
+		{"admin delete", h, "DELETE", "/v1/secrets/llm.second", bearer(markerAdmin), "", "", 204},
 	}
 
 	var sawValue bool
@@ -137,7 +129,7 @@ func TestLeak_NoSecretsOrTokensAnywhere(t *testing.T) {
 		if len(e) != 1 || e["error"] == "" {
 			t.Errorf("%s: error body has unexpected shape: %s", st.desc, body)
 		}
-		for _, name := range []string{"llm.", "github", "leak-", tokenPrefix, legacyTokenName} {
+		for _, name := range []string{"llm.", "github", "leak-", tokenPrefix} {
 			if strings.Contains(body, name) {
 				t.Errorf("%s: error body mentions %q: %s", st.desc, name, body)
 			}
@@ -226,10 +218,10 @@ func TestLeak_NoSecretsOrTokensAnywhere(t *testing.T) {
 		t.Errorf("sanity: audit output lacks the denied agent rows:\n%s", r.stdout)
 	}
 
-	// Everything slog wrote during the test, including the legacy
-	// AUTH_TOKEN deprecation warning and the decrypt / auth failure logs.
+	// Everything slog wrote during the test, including the decrypt / auth
+	// failure logs.
 	out := logs.String()
-	if !strings.Contains(out, "decrypt failed") || !strings.Contains(out, "AUTH_TOKEN is deprecated") {
+	if !strings.Contains(out, "decrypt failed") {
 		t.Errorf("sanity: expected failure-path logs were not captured:\n%s", out)
 	}
 	assertNoMarkers(t, "slog output", out)

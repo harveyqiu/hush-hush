@@ -145,15 +145,9 @@ func cmdLogin(args []string, stdout io.Writer) error {
 	if *url == "" || *token == "" {
 		return errors.New("login: --url and --token are required")
 	}
-	if err := saveConfigFile(Config{URL: *url, Token: *token}); err != nil {
-		return err
-	}
-	p, err := configPath()
+	p, err := saveConfigFile(Config{URL: *url, Token: *token})
 	if err != nil {
-		// saveConfigFile already succeeded so the file IS on disk; we just
-		// can't report where. Surface the resolution error so the user knows
-		// to look manually instead of trusting an empty path in the message.
-		return fmt.Errorf("login: config written but path resolution failed: %w", err)
+		return err
 	}
 	fmt.Fprintf(stdout, "config saved to %s (mode 0600)\n", p)
 	return nil
@@ -323,10 +317,7 @@ func cmdPut(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	}
 	wireValue := value
 	if key != nil {
-		wireValue, err = encryptWireFormat(key, []byte(value), []byte(name))
-		if err != nil {
-			return fmt.Errorf("put: encrypt: %w", err)
-		}
+		wireValue = encryptWireFormat(key, []byte(value), []byte(name))
 	} else if strings.HasPrefix(value, vaultPrefix) {
 		// Reserve the hh2: prefix on the plaintext write path. Without
 		// this, a no-vault user could put a value like "hh2:something"
@@ -459,11 +450,7 @@ func cmdInit(args []string, stdout io.Writer, promptFn func(prompt string) (stri
 		return errors.New("init: passphrases do not match")
 	}
 
-	salt, err := newSalt()
-	if err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-	if _, err := initVault(p1, defaultKDFParams(salt)); err != nil {
+	if _, err := initVault(p1, defaultKDFParams(newSalt())); err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
 	p, _ := vaultPath()
@@ -536,12 +523,7 @@ func cmdMigrate(ctx context.Context, args []string, stdout io.Writer, promptFn f
 			migrated++
 			continue
 		}
-		ct, err := encryptWireFormat(key, []byte(full.Value), []byte(s.Name))
-		if err != nil {
-			fmt.Fprintf(stdout, "error: %s: encrypt: %v\n", s.Name, err)
-			failed++
-			continue
-		}
+		ct := encryptWireFormat(key, []byte(full.Value), []byte(s.Name))
 		if _, err := c.Put(ctx, s.Name, ct); err != nil {
 			fmt.Fprintf(stdout, "error: %s: put: %v\n", s.Name, err)
 			failed++

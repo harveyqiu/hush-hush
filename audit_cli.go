@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -17,9 +19,10 @@ const (
 )
 
 var (
-	auditActions = []string{actionGet, actionList, actionPut, actionDelete}
+	auditActions = []string{actionGet, actionList, actionPut, actionDelete, actionOther,
+		actionTokenList, actionTokenCreate, actionTokenUpdate, actionTokenRevoke, actionAuditRead, actionWhoami}
 	auditResults = []string{resultAllowed, resultDenied, resultNotFound, resultUnauthenticated,
-		resultRateLimited, resultBadRequest, resultError}
+		resultRateLimited, resultBadRequest, resultConflict, resultError}
 )
 
 // parseAuditTime accepts an RFC3339 timestamp or a duration meaning "that
@@ -35,69 +38,123 @@ func parseAuditTime(flagName, s string, now time.Time) (int64, error) {
 	return now.Add(-d).Unix(), nil
 }
 
+// auditFilter selects audit_log rows. Zero values mean "no filter".
+type auditFilter struct {
+	Token, Secret, Action, Result string
+	Since, Until                  *int64 // unix seconds; since inclusive, until exclusive
+	Limit                         int
+}
+
+// auditRecord is one audit_log row as returned to admins.
+type auditRecord struct {
+	TS         int64  `json:"ts"`
+	TokenName  string `json:"token_name"`
+	Action     string `json:"action"`
+	SecretName string `json:"secret_name"`
+	Result     string `json:"result"`
+	RemoteAddr string `json:"remote_addr"`
+	RequestID  string `json:"request_id"`
+}
+
+// validate checks the enumerated fields and bounds. Errors are plain
+// messages suitable for both a usage error and a 400.
+func (f auditFilter) validate() error {
+	if f.Limit <= 0 || f.Limit > auditMaxLimit {
+		return fmt.Errorf("limit must be between 1 and %d, got %d", auditMaxLimit, f.Limit)
+	}
+	if f.Action != "" && !slices.Contains(auditActions, f.Action) {
+		return fmt.Errorf("action must be one of %s", strings.Join(auditActions, ", "))
+	}
+	if f.Result != "" && !slices.Contains(auditResults, f.Result) {
+		return fmt.Errorf("result must be one of %s", strings.Join(auditResults, ", "))
+	}
+	if f.Since != nil && f.Until != nil && *f.Since >= *f.Until {
+		return errors.New("since must be earlier than until")
+	}
+	return nil
+}
+
+// queryAudit returns matching rows, newest first. The WHERE clause is
+// assembled from constant fragments only; every value is a bound argument.
+func queryAudit(ctx context.Context, q dbtx, f auditFilter) ([]auditRecord, error) {
+	if err := f.validate(); err != nil {
+		return nil, err
+	}
+	var conds []string
+	var args []any
+	for _, c := range []struct{ col, val string }{
+		{"token_name = ?", f.Token},
+		{"secret_name = ?", f.Secret},
+		{"action = ?", f.Action},
+		{"result = ?", f.Result},
+	} {
+		if c.val != "" {
+			conds = append(conds, c.col)
+			args = append(args, c.val)
+		}
+	}
+	if f.Since != nil {
+		conds = append(conds, "ts >= ?")
+		args = append(args, *f.Since)
+	}
+	if f.Until != nil {
+		conds = append(conds, "ts < ?")
+		args = append(args, *f.Until)
+	}
+	query := `SELECT ts, token_name, action, secret_name, result, remote_addr, request_id FROM audit_log`
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, ` AND `) // #nosec G202 -- constant fragments only; values are bound
+	}
+	query += ` ORDER BY ts DESC, id DESC LIMIT ?`
+	args = append(args, f.Limit)
+
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []auditRecord{}
+	for rows.Next() {
+		var r auditRecord
+		if err := rows.Scan(&r.TS, &r.TokenName, &r.Action, &r.SecretName, &r.Result, &r.RemoteAddr, &r.RequestID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // cmdAudit prints audit_log rows, newest first. It reads the database file
 // directly, like the token subcommands, so it works with the server down.
 func cmdAudit(args []string, stdout io.Writer) error {
 	fs, dbPath := newFlagSet("audit")
-	token := fs.String("token", "", "only rows for this token name")
-	secret := fs.String("secret", "", "only rows for this secret name")
-	action := fs.String("action", "", "only this action: "+strings.Join(auditActions, ", "))
-	result := fs.String("result", "", "only this result: "+strings.Join(auditResults, ", "))
+	f := auditFilter{}
+	fs.StringVar(&f.Token, "token", "", "only rows for this token name")
+	fs.StringVar(&f.Secret, "secret", "", "only rows for this secret name")
+	fs.StringVar(&f.Action, "action", "", "only this action: "+strings.Join(auditActions, ", "))
+	fs.StringVar(&f.Result, "result", "", "only this result: "+strings.Join(auditResults, ", "))
 	since := fs.String("since", "", "only rows at or after this time (RFC3339, or e.g. 24h / 7d ago)")
 	until := fs.String("until", "", "only rows before this time (RFC3339, or e.g. 24h / 7d ago)")
-	limit := fs.Int("limit", auditDefaultLimit, "maximum rows to print")
+	fs.IntVar(&f.Limit, "limit", auditDefaultLimit, "maximum rows to print")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *limit <= 0 || *limit > auditMaxLimit {
-		return usageErr("audit: --limit must be between 1 and %d, got %d", auditMaxLimit, *limit)
-	}
-	if *action != "" && !slices.Contains(auditActions, *action) {
-		return usageErr("audit: --action must be one of %s", strings.Join(auditActions, ", "))
-	}
-	if *result != "" && !slices.Contains(auditResults, *result) {
-		return usageErr("audit: --result must be one of %s", strings.Join(auditResults, ", "))
-	}
-
-	// WHERE is assembled from constant fragments only; every user-supplied
-	// value is a bound argument.
-	var conds []string
-	var qargs []any
-	for _, f := range []struct {
-		col, val string
-	}{
-		{"token_name = ?", *token},
-		{"secret_name = ?", *secret},
-		{"action = ?", *action},
-		{"result = ?", *result},
-	} {
-		if f.val != "" {
-			conds = append(conds, f.col)
-			qargs = append(qargs, f.val)
-		}
-	}
 	now := time.Now()
-	var sinceTS, untilTS *int64
-	if *since != "" {
-		ts, err := parseAuditTime("since", *since, now)
+	for _, t := range []struct {
+		flag, val string
+		dst       **int64
+	}{{"since", *since, &f.Since}, {"until", *until, &f.Until}} {
+		if t.val == "" {
+			continue
+		}
+		ts, err := parseAuditTime(t.flag, t.val, now)
 		if err != nil {
 			return err
 		}
-		sinceTS = &ts
-		conds = append(conds, "ts >= ?")
-		qargs = append(qargs, ts)
+		*t.dst = &ts
 	}
-	if *until != "" {
-		ts, err := parseAuditTime("until", *until, now)
-		if err != nil {
-			return err
-		}
-		untilTS = &ts
-		conds = append(conds, "ts < ?")
-		qargs = append(qargs, ts)
-	}
-	if sinceTS != nil && untilTS != nil && *sinceTS >= *untilTS {
-		return usageErr("audit: --since must be earlier than --until")
+	if err := f.validate(); err != nil {
+		return usageErr("audit: %v", err)
 	}
 
 	db, err := openAdminDB(*dbPath)
@@ -106,33 +163,16 @@ func cmdAudit(args []string, stdout io.Writer) error {
 	}
 	defer db.Close()
 
-	query := `SELECT ts, token_name, action, secret_name, result, remote_addr, request_id FROM audit_log`
-	if len(conds) > 0 {
-		query += ` WHERE ` + strings.Join(conds, ` AND `) // #nosec G202 -- constant fragments only; values are bound
-	}
-	query += ` ORDER BY ts DESC, id DESC LIMIT ?`
-	qargs = append(qargs, *limit)
-
-	rows, err := db.Query(query, qargs...)
+	records, err := queryAudit(context.Background(), db, f)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TIME\tTOKEN\tACTION\tSECRET\tRESULT\tREMOTE\tREQUEST_ID")
-	for rows.Next() {
-		var ts int64
-		var tok, act, sec, res, remote, reqID string
-		if err := rows.Scan(&ts, &tok, &act, &sec, &res, &remote, &reqID); err != nil {
-			return err
-		}
+	for _, r := range records {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			time.Unix(ts, 0).UTC().Format(time.RFC3339),
-			orDash(tok), act, orDash(sec), res, orDash(remote), orDash(reqID))
-	}
-	if err := rows.Err(); err != nil {
-		return err
+			time.Unix(r.TS, 0).UTC().Format(time.RFC3339),
+			orDash(r.TokenName), r.Action, orDash(r.SecretName), r.Result, orDash(r.RemoteAddr), orDash(r.RequestID))
 	}
 	return tw.Flush()
 }

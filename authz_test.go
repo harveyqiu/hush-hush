@@ -206,9 +206,9 @@ func TestValidatePrefixes(t *testing.T) {
 		{"root", nil, false},
 	}
 	for _, tt := range tests {
-		err := validatePrefixes(tt.role, tt.prefixes)
+		err := validateGrants(tt.role, tt.prefixes, nil)
 		if (err == nil) != tt.ok {
-			t.Errorf("validatePrefixes(%s, %q) err=%v, want ok=%v", tt.role, tt.prefixes, err, tt.ok)
+			t.Errorf("validateGrants(%s, %q) err=%v, want ok=%v", tt.role, tt.prefixes, err, tt.ok)
 		}
 	}
 }

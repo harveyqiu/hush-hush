@@ -64,24 +64,21 @@ func loadConfigFile() (Config, error) {
 	return cfg, nil
 }
 
-// saveConfigFile writes cfg to the config path with mode 0600. Creates the
-// parent directory with 0700 if it doesn't exist.
-func saveConfigFile(cfg Config) error {
+// saveConfigFile writes cfg to the config path with mode 0600 and returns
+// that path. Creates the parent directory with 0700 if it doesn't exist.
+func saveConfigFile(cfg Config) (string, error) {
 	p, err := configPath()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+		return "", fmt.Errorf("create config dir: %w", err)
 	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
+	raw, _ := json.MarshalIndent(cfg, "", "  ") // plain struct: cannot fail
 	if err := os.WriteFile(p, raw, 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+		return "", fmt.Errorf("write config: %w", err)
 	}
-	return nil
+	return p, nil
 }
 
 // configPath returns the canonical config file location.

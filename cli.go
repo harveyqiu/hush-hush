@@ -3,10 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,23 +21,23 @@ const cliUsage = `hush-hush — self-hosted secret store (server + admin CLI).
 Usage:
   hush-hush [serve]                 Start the HTTP API (default with no subcommand)
   hush-hush token create --name N --role agent --prefix llm. [--prefix github.] [--expires 90d]
-  hush-hush token create --name N --role admin [--expires 90d]
+  hush-hush token create --name N --role admin --expires 30d   (admin: required, at most 90d)
+  hush-hush token create --name N --role agent --write-prefix crawler. [--prefix crawler.]
   hush-hush token list
   hush-hush token revoke --name N
-  hush-hush token update --name N --prefix llm. [--prefix ...]
-  hush-hush audit [--token N] [--secret N] [--action get|list|put|delete] [--result R]
+  hush-hush token update --name N [--prefix llm. ...] [--write-prefix crawler. ... | --no-write]
+  hush-hush audit [--token N] [--secret N] [--action get|list|put|delete|other] [--result R]
                   [--since T] [--until T] [--limit 100]
                                     T is RFC3339 (2026-09-01T00:00:00Z) or an age (24h, 7d)
+  hush-hush backup --out FILE|-           Consistent copy of the live database (VACUUM INTO); - streams to stdout
+  hush-hush audit-prune --older-than 180d   Delete old audit rows
+  hush-hush healthcheck             Exit 0 if the local server answers /healthz (for Docker HEALTHCHECK)
   hush-hush help
 
 Admin subcommands operate directly on the database file, not over HTTP.
 Run them as the user that owns the database (e.g. sudo -u hush ...).
 Every admin subcommand accepts --db PATH (default: $DB_PATH, else ./hush.db).
 `
-
-// tokenPrefix marks hush tokens so secret scanners (gitleaks etc.) can be
-// taught to spot a leaked one.
-const tokenPrefix = "hush_"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -65,6 +62,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "token":
 		err = cmdToken(args[1:], stdin, stdout, stderr)
+	case "backup":
+		err = cmdBackup(args[1:], stdout, stderr)
+	case "audit-prune":
+		err = cmdAuditPrune(args[1:], stdout)
+	case "healthcheck":
+		err = cmdHealthcheck(args[1:], os.Getenv)
 	case "audit":
 		err = cmdAudit(args[1:], stdout)
 	case "help", "-h", "--help":
@@ -148,14 +151,6 @@ func cmdToken(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 }
 
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return tokenPrefix + hex.EncodeToString(b), nil
-}
-
 // parseExpiry accepts Go durations ("12h", "90m") plus a day suffix
 // ("90d"), which time.ParseDuration lacks.
 func parseExpiry(s string) (time.Duration, error) {
@@ -199,8 +194,9 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	name := fs.String("name", "", "token name (required)")
 	role := fs.String("role", "", "admin or agent (required)")
 	expires := fs.String("expires", "", "lifetime, e.g. 90d or 12h (default: never)")
-	var prefixes multiFlag
+	var prefixes, writePrefixes multiFlag
 	fs.Var(&prefixes, "prefix", "readable name prefix, repeatable (agent only)")
+	fs.Var(&writePrefixes, "write-prefix", "create-only name prefix, repeatable (agent only)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -210,11 +206,8 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 	if *role == "" {
 		return usageErr("token create: --role is required (admin or agent)")
 	}
-	if err := validatePrefixes(*role, prefixes); err != nil {
-		return fmt.Errorf("token create: %w", err)
-	}
 	now := time.Now()
-	spec := tokenSpec{name: *name, role: *role, prefixes: prefixes}
+	spec := tokenSpec{name: *name, role: *role, prefixes: prefixes, writePrefixes: writePrefixes}
 	if *expires != "" {
 		d, err := parseExpiry(*expires)
 		if err != nil {
@@ -223,47 +216,49 @@ func cmdTokenCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) er
 		t := now.Add(d)
 		spec.expiresAt = &t
 	}
+	// Validate before touching the database or prompting.
+	if err := validateTokenSpec(spec, now); err != nil {
+		return fmt.Errorf("token create: %w", err)
+	}
 
 	db, err := openAdminDB(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	ctx := context.Background()
 
-	if exists, err := tokenExists(db, *name); err != nil {
+	if exists, err := tokenExists(ctx, db, *name); err != nil {
 		return err
 	} else if exists {
-		return fmt.Errorf("token create: a token named %q already exists (names are never reused, even after revoke)", *name)
+		return fmt.Errorf("token create: %w", errTokenExists)
 	}
-	if len(prefixes) == 1 && prefixes[0] == allSecrets {
+	if grantsAll(prefixes) {
 		if err := confirmAllSecrets(*name, stdin, stderr); err != nil {
 			return err
 		}
 	}
-
-	plaintext, err := generateToken()
+	plaintext, warnings, err := createToken(ctx, db, spec, now)
 	if err != nil {
-		return fmt.Errorf("generate token: %w", err)
-	}
-	if err := insertToken(context.Background(), db, spec, plaintext, now); err != nil {
 		return fmt.Errorf("token create: %w", err)
 	}
+	printWarnings(stderr, warnings)
 	fmt.Fprintf(stderr, "created %s token %q. Store it now; it cannot be shown again:\n", *role, *name)
 	fmt.Fprintln(stdout, plaintext)
 	return nil
 }
 
-func tokenExists(db *sql.DB, name string) (bool, error) {
-	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM tokens WHERE name = ?`, name).Scan(&n)
-	return n > 0, err
+func printWarnings(w io.Writer, warnings []string) {
+	for _, m := range warnings {
+		fmt.Fprintf(w, "WARNING: %s\n", m)
+	}
 }
 
-func fmtTime(v sql.NullInt64) string {
-	if !v.Valid {
+func fmtUnix(v *int64) string {
+	if v == nil {
 		return "-"
 	}
-	return time.Unix(v.Int64, 0).UTC().Format(time.RFC3339)
+	return time.Unix(*v, 0).UTC().Format(time.RFC3339)
 }
 
 func cmdTokenList(args []string, stdout io.Writer) error {
@@ -277,45 +272,20 @@ func cmdTokenList(args []string, stdout io.Writer) error {
 	}
 	defer db.Close()
 
-	// token_hash is deliberately not selected.
-	rows, err := db.Query(`SELECT name, role, prefixes, revoked_at, expires_at, last_used_at, created_at
-		FROM tokens ORDER BY name`)
+	tokens, err := listTokens(context.Background(), db, time.Now())
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	now := time.Now().Unix()
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tROLE\tPREFIXES\tSTATUS\tEXPIRES\tLAST_USED\tCREATED")
-	for rows.Next() {
-		var name, role, prefJSON string
-		var revoked, expires, lastUsed sql.NullInt64
-		var created int64
-		if err := rows.Scan(&name, &role, &prefJSON, &revoked, &expires, &lastUsed, &created); err != nil {
-			return err
+	fmt.Fprintln(tw, "NAME\tROLE\tPREFIXES\tWRITE\tSTATUS\tEXPIRES\tLAST_USED\tCREATED")
+	for _, t := range tokens {
+		pre, write := orDash(strings.Join(t.Prefixes, ",")), orDash(strings.Join(t.WritePrefixes, ","))
+		if t.Role == roleAdmin {
+			pre, write = "(all)", "(all, overwrite+delete)"
 		}
-		var prefixes []string
-		if err := json.Unmarshal([]byte(prefJSON), &prefixes); err != nil {
-			prefixes = []string{"<unreadable>"}
-		}
-		pre := strings.Join(prefixes, ",")
-		if role == roleAdmin {
-			pre = "(all, read/write)"
-		} else if pre == "" {
-			pre = "-"
-		}
-		status := "active"
-		switch {
-		case revoked.Valid:
-			status = "revoked"
-		case expires.Valid && now >= expires.Int64:
-			status = "expired"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, role, pre, status,
-			fmtTime(expires), fmtTime(lastUsed), fmtTime(sql.NullInt64{Int64: created, Valid: true}))
-	}
-	if err := rows.Err(); err != nil {
-		return err
+		created := t.CreatedAt
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t.Name, t.Role, pre, write, t.Status,
+			fmtUnix(t.ExpiresAt), fmtUnix(t.LastUsedAt), fmtUnix(&created))
 	}
 	return tw.Flush()
 }
@@ -335,71 +305,64 @@ func cmdTokenRevoke(args []string, stdout io.Writer) error {
 	}
 	defer db.Close()
 
-	res, err := db.Exec(`UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL`,
-		time.Now().Unix(), *name)
+	already, err := revokeToken(context.Background(), db, *name, time.Now())
 	if err != nil {
-		return err
+		return fmt.Errorf("token revoke: %q: %w", *name, err)
 	}
-	if n, _ := res.RowsAffected(); n == 1 {
-		fmt.Fprintf(stdout, "revoked %q; it is rejected from the next request on\n", *name)
-		return nil
-	}
-	if exists, err := tokenExists(db, *name); err != nil {
-		return err
-	} else if exists {
+	if already {
 		fmt.Fprintf(stdout, "%q was already revoked\n", *name)
 		return nil
 	}
-	return fmt.Errorf("token revoke: no token named %q", *name)
+	fmt.Fprintf(stdout, "revoked %q; it is rejected from the next request on\n", *name)
+	return nil
 }
 
 func cmdTokenUpdate(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs, dbPath := newFlagSet("token update")
 	name := fs.String("name", "", "token name (required)")
-	var prefixes multiFlag
-	fs.Var(&prefixes, "prefix", "new prefix set, repeatable; replaces the old set")
+	var prefixes, writePrefixes multiFlag
+	fs.Var(&prefixes, "prefix", "new read prefix set, repeatable; replaces the old set")
+	fs.Var(&writePrefixes, "write-prefix", "new create-only prefix set, repeatable; replaces the old set")
+	noWrite := fs.Bool("no-write", false, "remove all write prefixes")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *name == "" {
 		return usageErr("token update: --name is required")
 	}
-	if err := validatePrefixes(roleAgent, prefixes); err != nil {
-		return fmt.Errorf("token update: %w", err)
+	if len(prefixes) == 0 && len(writePrefixes) == 0 && !*noWrite {
+		return usageErr("token update: give --prefix, --write-prefix or --no-write")
 	}
+	if *noWrite && len(writePrefixes) > 0 {
+		return usageErr("token update: --no-write and --write-prefix are mutually exclusive")
+	}
+	var u grantUpdate
+	if len(prefixes) > 0 {
+		p := []string(prefixes)
+		u.prefixes = &p
+	}
+	if len(writePrefixes) > 0 || *noWrite {
+		w := []string(writePrefixes)
+		u.writePrefixes = &w
+	}
+
 	db, err := openAdminDB(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	var role string
-	var revoked sql.NullInt64
-	err = db.QueryRow(`SELECT role, revoked_at FROM tokens WHERE name = ?`, *name).Scan(&role, &revoked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("token update: no token named %q", *name)
-	}
-	if err != nil {
-		return err
-	}
-	if role != roleAgent {
-		return fmt.Errorf("token update: %q is an %s token; only agent tokens have prefixes", *name, role)
-	}
-	if revoked.Valid {
-		return fmt.Errorf("token update: %q is revoked", *name)
-	}
-	if len(prefixes) == 1 && prefixes[0] == allSecrets {
+	if grantsAll(prefixes) {
 		if err := confirmAllSecrets(*name, stdin, stderr); err != nil {
 			return err
 		}
 	}
-	pj, err := json.Marshal([]string(prefixes))
+	read, write, warnings, err := updateTokenGrants(context.Background(), db, *name, u)
 	if err != nil {
-		return err
+		return fmt.Errorf("token update: %q: %w", *name, err)
 	}
-	if _, err := db.Exec(`UPDATE tokens SET prefixes = ? WHERE name = ?`, string(pj), *name); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "updated %q: prefixes %s (effective from the next request)\n", *name, strings.Join(prefixes, ","))
+	printWarnings(stderr, warnings)
+	fmt.Fprintf(stdout, "updated %q: read %s, write %s (effective from the next request)\n",
+		*name, orDash(strings.Join(read, ",")), orDash(strings.Join(write, ",")))
 	return nil
 }
