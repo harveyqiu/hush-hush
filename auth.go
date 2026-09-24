@@ -130,7 +130,7 @@ type tokenSpec struct {
 
 // insertToken stores the SHA-256 of plaintext; the plaintext itself never
 // reaches the database.
-func insertToken(ctx context.Context, db *sql.DB, spec tokenSpec, plaintext string, now time.Time) error {
+func insertToken(ctx context.Context, db dbtx, spec tokenSpec, plaintext string, now time.Time) error {
 	prefixes := spec.prefixes
 	if prefixes == nil {
 		prefixes = []string{}
