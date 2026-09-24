@@ -1,27 +1,29 @@
-# Traefik variant: layer this on top of compose.yaml.
+# Traefik variant: layer this on top of compose.yaml, with Traefik running
+# as a container on the same host (same Docker daemon).
 #
+#   docker network create --internal --subnet 172.29.54.0/24 hush-edge   # once
 #   cp .env.example .env    # then edit the values
-#   docker compose -f compose.yaml -f compose.traefik.yaml up -d
+#   docker compose up -d    # .env sets COMPOSE_FILE to include this file
 #
-# Assumes Traefik v3 already runs with the Docker provider
-# (exposedByDefault=false), a websecure entrypoint and a certificate
-# resolver, and that it is attached to the external network named below.
-# Full guide: docs/docker.md, section "使用 Traefik".
+# hush-edge is a private, internal network shared only by Traefik and
+# hush-hush: no other container can reach port 8080 (so nothing bypasses the
+# admin IP allowlist below), X-Forwarded-For is trusted from that subnet
+# only, and the hush container has no route to the internet.
+# Full guide: docs/docker.md, section 2.5.
 
 services:
   hush:
-    # No host port: Traefik reaches the container over the shared network.
+    # No host port: Traefik reaches the container over hush-edge.
     ports: !reset []
     environment:
-      # Only Traefik may set X-Forwarded-For. Use Traefik's address on the
-      # shared network (pin it, see docs) or that network's subnet.
-      TRUSTED_PROXIES: ${TRAEFIK_TRUSTED:?set TRAEFIK_TRUSTED in .env}
-    networks:
-      - hush
-      - traefik
+      # Only Traefik and hush itself are on hush-edge, so trusting the
+      # subnet trusts exactly Traefik.
+      TRUSTED_PROXIES: ${HUSH_EDGE_SUBNET:-172.29.54.0/24}
+    networks: !override
+      - hush-edge
     labels:
       traefik.enable: "true"
-      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+      traefik.docker.network: hush-edge
 
       # Agent-facing API (/v1/secrets, /healthz): reachable from anywhere
       # Traefik serves; every call still needs a token.
@@ -44,6 +46,5 @@ services:
       traefik.http.services.hush.loadbalancer.server.port: "8080"
 
 networks:
-  traefik:
+  hush-edge:
     external: true
-    name: ${TRAEFIK_NETWORK:-traefik}

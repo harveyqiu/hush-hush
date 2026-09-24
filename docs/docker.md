@@ -67,61 +67,81 @@ token 只打印这一次。把它存进密码管理器。
 
 两种接法，任选其一。
 
-#### 方式 A：Traefik（容器方式，推荐）
+#### 方式 A：Traefik（同一台 VPS 上的容器，推荐）
 
-Traefik 通过 Docker 网络直接访问 hush 容器，不需要在宿主机上开端口。仓库里的 `compose.traefik.yaml` 是一个叠加文件，作用如下：
+Traefik 和 hush 跑在同一台 VPS、同一个 Docker 上。两者之间走一个**专用的私有网络 `hush-edge`**，这个网络上只有它们两个容器：
+
+```
+互联网 ──443──► Traefik ──hush-edge（internal）──► hush:8080
+                  │
+                  └─ 你其他的应用（在 Traefik 自己的网络上，连不到 hush）
+```
+
+为什么不直接接到 Traefik 现有的公共网络上：那个网络上通常还有你其他走 Traefik 的应用，它们能绕过 Traefik 直接访问 `hush:8080`，下面的管理界面 IP 白名单就被绕过了。单独建一个网络有三个好处：
+
+- 除了 Traefik，没有别的容器能连到 hush；
+- 网段里只有 Traefik 会发请求给 hush，所以 `TRUSTED_PROXIES` 可以直接信任整个网段，不用给 Traefik 固定 IP；
+- 网络是 `internal` 的，hush 容器访问不了外网，被攻破也没法把数据往外发。
+
+`compose.traefik.yaml` 是叠加在 `compose.yaml` 上的配置，作用如下：
 
 - 去掉宿主机端口映射；
-- 把 hush 接入 Traefik 所在的网络，并加上路由标签；
-- `/v1/secrets` 和 `/healthz` 对外开放，agent 从哪里都能访问；每次调用仍然要带 token；
-- `/ui`、`/v1/admin` 和根路径 `/` 只允许 `HUSH_ADMIN_ALLOW` 里列出的地址访问，其他来源由 Traefik 直接返回 403，请求到不了 hush。
+- 把 hush 只接入 `hush-edge` 网络；
+- `/v1/secrets` 和 `/healthz` 对外开放，agent 从哪里都能访问，每次调用仍然要带 token；
+- `/ui`、`/v1/admin` 和根路径 `/` 只允许 `HUSH_ADMIN_ALLOW` 里的地址访问，其他来源由 Traefik 直接返回 403。
 
 **前提**：
 - Traefik v3，启用 Docker provider，且 `exposedByDefault=false`；
 - 有一个 `websecure` 入口和一个证书解析器，名字可在 `.env` 里改；
-- **Traefik 版本 ≥ v3.6**。Docker 29 要求客户端的 Docker API 版本至少为 1.40，更早的 Traefik 连不上 Docker，读不到容器标签。日志里会出现 `client version 1.24 is too old`。
+- **Traefik 版本 ≥ v3.6**。Docker 29 要求客户端的 Docker API 版本至少为 1.40，更早的 Traefik 连不上 Docker、读不到容器标签。日志里会出现 `client version 1.24 is too old`。
 
 **步骤**：
 
-1. 固定 Traefik 在共享网络上的 IP，只有这个地址会被信任设置 `X-Forwarded-For`。在 Traefik 自己的 compose 里：
+1. 创建私有网络（只做一次）：
+
+   ```bash
+   docker network create --internal --subnet 172.29.54.0/24 hush-edge
+   ```
+
+2. 让 Traefik 也接入这个网络。在 Traefik 自己的 compose 里，保留它原来的网络，再加上 `hush-edge`：
 
    ```yaml
    services:
      traefik:
        networks:
-         traefik:
-           ipv4_address: 172.30.0.2
+         - web          # Traefik 原来的网络（名字以你的为准）
+         - hush-edge
    networks:
-     traefik:
-       name: traefik
-       ipam:
-         config:
-           - subnet: 172.30.0.0/24
+     web:
+       external: true   # 或者按你原来的写法
+     hush-edge:
+       external: true
    ```
 
-   如果不想固定 IP，也可以把 `TRAEFIK_TRUSTED` 设为整个网络的网段，例如 `172.30.0.0/24`。代价是：接在这个网络上的任何容器都能伪造来源 IP，影响范围是审计里的来源地址和按 IP 的失败鉴权限流，不影响 token 鉴权本身。
+   然后执行 `docker compose up -d` 重建 Traefik。也可以临时执行 `docker network connect hush-edge traefik`，但这样 Traefik 重建后会丢失这个网络。
 
-2. 复制并编辑环境变量文件：
+3. 复制并编辑环境变量文件：
 
    ```bash
    cp .env.example .env
-   # 修改 HUSH_HOST、TRAEFIK_NETWORK、TRAEFIK_TRUSTED、HUSH_ADMIN_ALLOW；
-   # 入口和证书解析器名称如与默认不同也要改
+   # 修改 HUSH_HOST、HUSH_ADMIN_ALLOW；入口和证书解析器名称如与默认不同也要改
    ```
 
    `.env` 里的 `COMPOSE_FILE=compose.yaml:compose.traefik.yaml` 会让之后所有 `docker compose ...` 命令自动带上 Traefik 配置。
 
-3. 启动：`docker compose up -d`。
+4. 启动：`docker compose up -d`。
 
 **验证**：
 
 ```bash
-curl https://secrets.example.com/healthz          # {"status":"ok"}
-curl -o /dev/null -w '%{http_code}\n' https://secrets.example.com/ui/   # 白名单外应为 403
-docker compose exec hush hush-hush audit --limit 3                     # REMOTE 列应为真实客户端 IP，而不是 Traefik 的地址
+curl https://secrets.example.com/healthz                                # {"status":"ok"}
+curl -o /dev/null -w '%{http_code}\n' https://secrets.example.com/ui/  # 白名单外应为 403
+docker compose exec hush hush-hush audit --limit 3                      # REMOTE 列应为真实客户端 IP，而不是 172.29.54.x
 ```
 
-**关于来源 IP**：Traefik 默认会丢弃客户端自己带来的 `X-Forwarded-For`，再写入它看到的真实地址，所以客户端无法伪造来源 IP。如果 Traefik 前面还有 CDN 或负载均衡，需要在 Traefik 的入口上配置 `forwardedHeaders.trustedIPs`，否则审计里记录的会是 CDN 的地址，白名单判断也会基于 CDN 的地址。
+**关于来源 IP**：Traefik 默认会丢弃客户端自己带来的 `X-Forwarded-For`，再写入它看到的真实地址，所以客户端无法伪造来源 IP。如果 Traefik 前面还有 CDN 或负载均衡，需要在 Traefik 的入口上配置 `forwardedHeaders.trustedIPs`，否则审计里记录的和白名单判断用的都会是 CDN 的地址。
+
+`172.29.54.0/24` 如果和 VPS 上已有的网络冲突，创建网络时换一个网段，同时修改 `.env` 里的 `HUSH_EDGE_SUBNET`。
 
 Traefik v2 的中间件叫 `ipwhitelist`，不叫 `ipallowlist`。用 v2 的话，要改 `compose.traefik.yaml` 里对应的标签。
 
