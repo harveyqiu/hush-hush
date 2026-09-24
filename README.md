@@ -198,6 +198,8 @@ sudo -u hush env DB_PATH=/var/lib/hush/hush.db hush-hush audit --token llm-agent
 
 Rotation, backups, audit pruning and moving off `AUTH_TOKEN` are covered in [`deploy/README.md`](deploy/README.md).
 
+If you are writing an agent or script that consumes secrets, hand it [`docs/agent-guide.md`](docs/agent-guide.md): endpoints, status-code handling, retry rules, code samples and a system-prompt snippet for LLM agents (in Chinese).
+
 ## CLI
 
 A thin client lives in [`cmd/hush`](cmd/hush). Install:
