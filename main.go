@@ -6,8 +6,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -21,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
@@ -46,9 +43,12 @@ var nameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,128}$`)
 var requestIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 type server struct {
-	db            *sql.DB
-	gcm           cipher.AEAD
-	authTokenHash [32]byte
+	db  *sql.DB
+	gcm cipher.AEAD
+	// legacyTokenHash is set only when the deprecated AUTH_TOKEN env var
+	// is in use; it then authenticates as an admin.
+	legacyTokenHash *[32]byte
+	now             func() time.Time
 }
 
 type secretRow struct {
@@ -67,7 +67,7 @@ func main() {
 	}))
 
 	keyB64 := mustEnv("MASTER_KEY")
-	token := mustEnv("AUTH_TOKEN")
+	token := os.Getenv("AUTH_TOKEN")
 	dbPath := getenv("DB_PATH", "./hush.db")
 	port := getenv("PORT", "8080")
 
@@ -79,23 +79,21 @@ func main() {
 		fatal("MASTER_KEY: must decode to 32 bytes", "got", len(key))
 	}
 
-	db, err := sql.Open("sqlite",
-		dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := openDB(dbPath)
 	if err != nil {
-		fatal("sqlite open failed", "error", err)
+		fatal("database open failed", "error", err)
 	}
 	defer db.Close()
-	// SQLite serializes writers; capping the pool at 1 avoids spurious
-	// SQLITE_BUSY at the database/sql layer for a single-user workload.
-	db.SetMaxOpenConns(1)
-
-	if err := initSchema(db); err != nil {
-		fatal("schema init failed", "error", err)
-	}
+	checkDBPerms(dbPath)
 
 	s, err := newServer(db, key, token)
 	if err != nil {
 		fatal("server init failed", "error", err)
+	}
+	if n, err := s.activeTokenCount(); err != nil {
+		fatal("token count failed", "error", err)
+	} else if n == 0 && token == "" {
+		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
 	}
 
 	srv := &http.Server{
@@ -130,7 +128,8 @@ func main() {
 // newServer constructs a server from already-validated dependencies.
 // Extracted from main() so tests can build a server against an in-memory
 // database without parsing env vars or duplicating crypto setup.
-func newServer(db *sql.DB, key []byte, token string) (*server, error) {
+// legacyToken is the deprecated AUTH_TOKEN value, or "" when unset.
+func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -139,11 +138,21 @@ func newServer(db *sql.DB, key []byte, token string) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{
-		db:            db,
-		gcm:           gcm,
-		authTokenHash: sha256.Sum256([]byte(token)),
-	}, nil
+	s := &server{db: db, gcm: gcm, now: time.Now}
+	if legacyToken != "" {
+		slog.Warn("AUTH_TOKEN is deprecated: it is accepted as an admin token but cannot be scoped or revoked individually; create named tokens with `token create` and unset AUTH_TOKEN")
+		h := hashToken(legacyToken)
+		s.legacyTokenHash = &h
+	}
+	return s, nil
+}
+
+func (s *server) activeTokenCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens
+		WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+		s.now().Unix()).Scan(&n)
+	return n, err
 }
 
 func (s *server) routes() http.Handler {
@@ -156,41 +165,24 @@ func (s *server) routes() http.Handler {
 	return mux
 }
 
-func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS secrets (
-			name       TEXT PRIMARY KEY,
-			ciphertext BLOB NOT NULL,
-			nonce      BLOB NOT NULL,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		);
-	`)
-	return err
-}
+type principalKey struct{}
 
+// requireAuth authenticates the caller and stores the principal in the
+// request context. Every credential failure gets the same 401 body so the
+// response never reveals whether a token exists, was revoked, or expired.
 func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeErr(w, http.StatusUnauthorized, "missing bearer token")
+		p, err := s.authenticate(r.Context(), r)
+		if errors.Is(err, errUnauthenticated) {
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		// Hash both sides so the compared slices are always 32 bytes;
-		// ConstantTimeCompare short-circuits on length mismatch and would
-		// otherwise leak the real token's length via timing.
-		//
-		// TrimSpace handles benign client mistakes (extra space after the
-		// scheme, trailing whitespace) per RFC 7230 §3.2.4 — without it,
-		// "Bearer  token" reaches the compare as " token" and silently
-		// 401s with a misleading "invalid token" instead of succeeding.
-		given := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		givenHash := sha256.Sum256([]byte(given))
-		if subtle.ConstantTimeCompare(givenHash[:], s.authTokenHash[:]) != 1 {
-			writeErr(w, http.StatusUnauthorized, "invalid token")
+		if err != nil {
+			slog.ErrorContext(r.Context(), "token lookup failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	}
 }
 
