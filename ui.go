@@ -22,10 +22,8 @@ const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-
 	"img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 func (s *server) uiRoutes(mux *http.ServeMux) {
-	sub, err := fs.Sub(uiFiles, "ui")
-	if err != nil {
-		panic(err) // the embed path is a compile-time constant
-	}
+	// fs.Sub only fails for an invalid path; "ui" is a constant.
+	sub, _ := fs.Sub(uiFiles, "ui")
 	files := http.StripPrefix("/ui/", http.FileServer(http.FS(sub)))
 	mux.Handle("GET /ui/", uiHeaders(files))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {

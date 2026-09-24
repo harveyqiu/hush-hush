@@ -7,7 +7,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +65,7 @@ type secretRow struct {
 }
 
 // serve runs the HTTP API until SIGINT/SIGTERM. It is the default when the
-// binary is started without a subcommand, preserving v0.1.0 behaviour.
+// binary is started without a subcommand.
 func serve() {
 	// JSON to stdout: `docker logs` and jq friendly.
 	// contextHandler picks up request_id from r.Context() so handlers don't
@@ -74,91 +73,117 @@ func serve() {
 	slog.SetDefault(slog.New(&contextHandler{
 		Handler: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 	}))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runServer(ctx, os.Getenv, os.ReadFile, nil); err != nil {
+		fatal("server stopped", "error", err)
+	}
+}
 
-	cfg, err := loadConfig(os.Getenv, os.ReadFile)
+// runServer loads the configuration, opens the database and serves until
+// ctx is cancelled, then shuts down gracefully. listening, if non-nil, is
+// called with the bound address once the listener is up (tests bind to
+// port 0 and need to know where).
+func runServer(ctx context.Context, getenv func(string) string, readFile func(string) ([]byte, error), listening func(addr string)) error {
+	cfg, err := loadConfig(getenv, readFile)
 	if err != nil {
-		fatal("invalid configuration", "error", err)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	for _, w := range cfg.warnings {
 		slog.Warn(w)
 	}
-	dbPath := cfg.dbPath
 
-	db, err := openDB(dbPath)
+	db, err := openDB(cfg.dbPath)
 	if err != nil {
-		fatal("database open failed", "error", err)
+		return fmt.Errorf("database open failed: %w", err)
 	}
 	defer db.Close()
-	checkDBPerms(dbPath)
+	checkDBPerms(cfg.dbPath)
 
-	s, err := newServer(db, cfg.key)
-	if err != nil {
-		fatal("server init failed", "error", err)
-	}
+	s := newServer(db, cfg.key)
 	// The cipher has its own expanded copy; drop ours.
 	clear(cfg.key)
 	s.tokenLimiter = newRateLimiter(cfg.rateLimitPerMinute)
 	s.ipLimiter = newRateLimiter(cfg.unauthRateLimitPerMinute)
 	s.trustedProxies = cfg.trustedProxies
 	s.adminAPI = cfg.adminAPI
-	if n, err := s.activeTokenCount(); err != nil {
-		fatal("token count failed", "error", err)
-	} else if n == 0 {
-		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
-	}
-	if names, err := s.adminTokensExpiringWithin(7 * 24 * time.Hour); err != nil {
-		fatal("token expiry check failed", "error", err)
-	} else if len(names) > 0 {
-		slog.Warn("admin tokens expire within 7 days; create replacements before they lapse", "tokens", names)
+	if err := s.startupChecks(); err != nil {
+		return err
 	}
 
+	ln, err := net.Listen("tcp", cfg.listenAddr)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
-		Addr:              cfg.listenAddr,
 		Handler:           withRequestID(s.routes()),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	go func() {
-		// key_source says where the key came from; the key itself is
-		// never logged.
-		slog.Info("listening", "addr", cfg.listenAddr, "db_path", dbPath,
-			"key_source", cfg.keySource, "trusted_proxies", len(cfg.trustedProxies),
-			"admin_api", cfg.adminAPI,
-			"rate_limit_per_minute", cfg.rateLimitPerMinute,
-			"unauth_rate_limit_per_minute", cfg.unauthRateLimitPerMinute)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fatal("listen failed", "error", err)
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("shutdown: draining connections", "grace", shutdownGrace.String())
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown failed", "error", err)
+	// key_source says where the key came from; the key itself is never
+	// logged.
+	slog.Info("listening", "addr", ln.Addr().String(), "db_path", cfg.dbPath,
+		"key_source", cfg.keySource, "trusted_proxies", len(cfg.trustedProxies),
+		"admin_api", cfg.adminAPI,
+		"rate_limit_per_minute", cfg.rateLimitPerMinute,
+		"unauth_rate_limit_per_minute", cfg.unauthRateLimitPerMinute)
+	if listening != nil {
+		listening(ln.Addr().String())
 	}
+
+	shutdown := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutdown: draining connections", "grace", shutdownGrace.String())
+		// ctx is already cancelled; keep its values but not its
+		// cancellation, or the grace period would be zero.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
+		defer cancel()
+		shutdown <- srv.Shutdown(sctx)
+	}()
+	// Serve returns ErrServerClosed once Shutdown starts; anything else
+	// is a listener failure.
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	err = <-shutdown
 	slog.Info("shutdown: done")
+	return err
+}
+
+// startupChecks logs the operator-facing warnings about tokens.
+func (s *server) startupChecks() error {
+	n, err := s.activeTokenCount()
+	if err != nil {
+		return fmt.Errorf("token count: %w", err)
+	}
+	if n == 0 {
+		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
+	}
+	names, err := s.adminTokensExpiringWithin(7 * 24 * time.Hour)
+	if err != nil {
+		return fmt.Errorf("token expiry check: %w", err)
+	}
+	if len(names) > 0 {
+		slog.Warn("admin tokens expire within 7 days; create replacements before they lapse", "tokens", names)
+	}
+	return nil
 }
 
 // newServer constructs a server from already-validated dependencies.
 // Extracted from main() so tests can build a server against an in-memory
 // database without parsing env vars or duplicating crypto setup.
-func newServer(db *sql.DB, key []byte) (*server, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
+//
+// key must be 32 bytes (loadConfig guarantees it); anything else panics,
+// since it can only be a programming error.
+func newServer(db *sql.DB, key []byte) *server {
+	if len(key) != 32 {
+		panic("newServer: key must be 32 bytes")
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
+	block, _ := aes.NewCipher(key) // cannot fail for a 32-byte key
+	gcm, _ := cipher.NewGCM(block) // cannot fail for AES's 128-bit block
 	s := &server{
 		db:           db,
 		gcm:          gcm,
@@ -167,7 +192,7 @@ func newServer(db *sql.DB, key []byte) (*server, error) {
 		ipLimiter:    newRateLimiter(defaultUnauthRateLimitPerMinute),
 		adminAPI:     true, // matches the ADMIN_API default; serve() applies the config
 	}
-	return s, nil
+	return s
 }
 
 // adminTokensExpiringWithin names active admin tokens that expire within d.
@@ -262,10 +287,6 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 			slog.ErrorContext(r.Context(), "list scan failed", "error", err)
 			writeErr(w, http.StatusInternalServerError, "db error")
 			return
-		}
-		// Belt and braces: the SQL filter should already guarantee this.
-		if !p.canRead(sr.Name) {
-			continue
 		}
 		out = append(out, sr)
 	}
@@ -383,10 +404,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nonce := make([]byte, s.gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		writeErr(w, http.StatusInternalServerError, "rng failed")
-		return
-	}
+	_, _ = rand.Read(nonce) // never fails since Go 1.24 (see randomHex)
 	// 1-byte version prefix lets us migrate algorithms later without
 	// losing access to existing rows. Version is also bound into AAD
 	// so flipping the prefix byte is rejected by the AEAD tag.
@@ -530,20 +548,11 @@ func (h *contextHandler) Handle(ctx context.Context, r slog.Record) error {
 //  1. Inbound X-Request-ID (e.g. an upstream proxy / CDN trace) if it
 //     passes requestIDRe — preserves end-to-end correlation.
 //  2. Fresh 16-hex-char value from crypto/rand.
-//  3. The string "rng-failed" as a last-resort sentinel so log lines
-//     are still correlatable instead of orphaned. rand.Read failing on
-//     Linux is essentially impossible but the empty-ID branch was a
-//     silent observability hole.
 func withRequestID(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
 		if !requestIDRe.MatchString(id) {
-			b := make([]byte, 8)
-			if _, err := rand.Read(b); err == nil {
-				id = hex.EncodeToString(b)
-			} else {
-				id = "rng-failed"
-			}
+			id = randomHex(8)
 		}
 		w.Header().Set("X-Request-ID", id)
 		ctx := context.WithValue(r.Context(), ctxKey{}, id)

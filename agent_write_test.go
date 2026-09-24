@@ -162,10 +162,7 @@ func TestMigrate_ExistingTokensGetNoWriteGrant(t *testing.T) {
 	if err := db.QueryRow(`SELECT write_prefixes FROM tokens WHERE name = 'old-agent'`).Scan(&wp); err != nil || wp != "[]" {
 		t.Fatalf("write_prefixes = %q (err %v), want []", wp, err)
 	}
-	s, err := newServer(db, testKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newServer(db, testKey())
 	if code := putAs(s.routes(), agentToken, "crawler.x", "v"); code != http.StatusForbidden {
 		t.Errorf("pre-migration agent PUT: got %d, want 403", code)
 	}

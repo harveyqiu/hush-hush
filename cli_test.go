@@ -46,10 +46,7 @@ func serverOn(t *testing.T, path string) (*server, http.Handler) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	s, err := newServer(db, testKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newServer(db, testKey())
 	return s, s.routes()
 }
 

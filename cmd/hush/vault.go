@@ -44,8 +44,8 @@ const (
 	verifyAAD = "hush-vault-verify"
 
 	vaultSaltBytes = 16
-	keyBytes       = chacha20poly1305.KeySize     // 32
-	nonceBytes     = chacha20poly1305.NonceSizeX  // 24
+	keyBytes       = chacha20poly1305.KeySize    // 32
+	nonceBytes     = chacha20poly1305.NonceSizeX // 24
 	vaultFileMode  = 0o600
 )
 
@@ -115,10 +115,7 @@ func initVault(passphrase string, params KDFParams) (VaultConfig, error) {
 	if err != nil {
 		return VaultConfig{}, err
 	}
-	verify, err := encryptWireFormat(key, []byte(verifyPlaintext), []byte(verifyAAD))
-	if err != nil {
-		return VaultConfig{}, fmt.Errorf("create verify blob: %w", err)
-	}
+	verify := encryptWireFormat(key, []byte(verifyPlaintext), []byte(verifyAAD))
 	cfg := VaultConfig{Version: 1, KDF: params, Verify: verify}
 	if err := saveNewVault(cfg); err != nil {
 		return VaultConfig{}, err
@@ -180,10 +177,7 @@ func saveNewVault(cfg VaultConfig) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return fmt.Errorf("create vault dir: %w", err)
 	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
+	raw, _ := json.MarshalIndent(cfg, "", "  ") // plain struct: cannot fail
 	// O_EXCL is the race-free version of "create iff not exist". Pairs
 	// with the user-facing errVaultExists so the CLI can map it to a
 	// friendly message.
@@ -195,17 +189,16 @@ func saveNewVault(cfg VaultConfig) error {
 	if err != nil {
 		return fmt.Errorf("write vault: %w", err)
 	}
-	if _, werr := f.Write(raw); werr != nil {
-		_ = f.Close()
+	_, werr := f.Write(raw)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
 		// Clean up the empty/partial file so retries don't dead-end on
 		// errVaultExists. Ignore the remove error: if it also fails the
 		// user has a worse problem than we can hide.
 		_ = os.Remove(p)
 		return fmt.Errorf("write vault: %w", werr)
-	}
-	if cerr := f.Close(); cerr != nil {
-		_ = os.Remove(p)
-		return fmt.Errorf("write vault: %w", cerr)
 	}
 	return nil
 }
@@ -271,23 +264,21 @@ func deriveKey(passphrase string, p KDFParams) ([]byte, error) {
 // the given plaintext and AAD. The 24-byte XChaCha20 nonce is generated
 // with crypto/rand — XChaCha20's 192-bit nonce means random nonces are
 // safe to the birthday bound (no per-key counter needed).
-func encryptWireFormat(key, plaintext, aad []byte) (string, error) {
+//
+// key must be keyBytes long (deriveKey guarantees it); anything else
+// panics, since it can only be a programming error.
+func encryptWireFormat(key, plaintext, aad []byte) string {
 	if len(key) != keyBytes {
-		return "", fmt.Errorf("key must be %d bytes, got %d", keyBytes, len(key))
+		panic(fmt.Sprintf("encryptWireFormat: key must be %d bytes, got %d", keyBytes, len(key)))
 	}
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return "", err
-	}
+	aead, _ := chacha20poly1305.NewX(key) // only fails on key length, checked above
 	nonce := make([]byte, nonceBytes)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("nonce rng: %w", err)
-	}
+	_, _ = rand.Read(nonce) // never fails since Go 1.24
 	ct := aead.Seal(nil, nonce, plaintext, aad)
 	blob := make([]byte, 0, len(nonce)+len(ct))
 	blob = append(blob, nonce...)
 	blob = append(blob, ct...)
-	return vaultPrefix + base64.StdEncoding.EncodeToString(blob), nil
+	return vaultPrefix + base64.StdEncoding.EncodeToString(blob)
 }
 
 // decryptWireFormat reverses encryptWireFormat. Returns errNotEncrypted
@@ -309,10 +300,7 @@ func decryptWireFormat(key []byte, wireValue string, aad []byte) ([]byte, error)
 		return nil, errBadWireFormat
 	}
 	nonce, ct := blob[:nonceBytes], blob[nonceBytes:]
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
+	aead, _ := chacha20poly1305.NewX(key) // only fails on key length, checked above
 	pt, err := aead.Open(nil, nonce, ct, aad)
 	if err != nil {
 		// AEAD tag mismatch means either the key is wrong (passphrase)
@@ -325,15 +313,11 @@ func decryptWireFormat(key []byte, wireValue string, aad []byte) ([]byte, error)
 	return pt, nil
 }
 
-// newSalt returns a freshly-generated salt of the standard size, or an
-// error if the platform RNG is exhausted (essentially impossible on
-// modern Unix-likes; surfaced explicitly so callers don't proceed with
-// a zero salt).
-func newSalt() ([]byte, error) {
+// newSalt returns a freshly-generated salt of the standard size.
+// crypto/rand.Read never fails since Go 1.24 (it crashes the program
+// instead), so a zero salt can't slip through.
+func newSalt() []byte {
 	salt := make([]byte, vaultSaltBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, fmt.Errorf("salt rng: %w", err)
-	}
-	return salt, nil
+	_, _ = rand.Read(salt)
+	return salt
 }
-

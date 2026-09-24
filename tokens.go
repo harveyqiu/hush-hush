@@ -56,12 +56,27 @@ type tokenInfo struct {
 	CreatedAt     int64    `json:"created_at"`
 }
 
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+// randomHex returns n random bytes, hex encoded. Since Go 1.24
+// crypto/rand.Read never returns an error (it crashes the program if the
+// OS source fails), so there is no error to handle.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func generateToken() string {
+	return tokenPrefix + randomHex(32)
+}
+
+// grantJSON encodes a prefix list for the tokens table, never as null.
+// Marshalling a []string cannot fail.
+func grantJSON(p []string) string {
+	if p == nil {
+		p = []string{}
 	}
-	return tokenPrefix + hex.EncodeToString(b), nil
+	b, _ := json.Marshal(p)
+	return string(b)
 }
 
 // grantsAll reports whether a read-prefix list is the "*" wildcard, which
@@ -107,10 +122,7 @@ func createToken(ctx context.Context, q dbtx, spec tokenSpec, now time.Time) (st
 	if err != nil {
 		return "", nil, err
 	}
-	plaintext, err := generateToken()
-	if err != nil {
-		return "", nil, fmt.Errorf("generate token: %w", err)
-	}
+	plaintext := generateToken()
 	if err := insertToken(ctx, q, spec, plaintext, now); err != nil {
 		return "", nil, err
 	}
@@ -215,16 +227,8 @@ func updateTokenGrants(ctx context.Context, q dbtx, name string, u grantUpdate) 
 			return nil, nil, nil, err
 		}
 	}
-	rj, err := json.Marshal(read)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	wj, err := json.Marshal(write)
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	if _, err := q.ExecContext(ctx, `UPDATE tokens SET prefixes = ?, write_prefixes = ? WHERE name = ?`,
-		string(rj), string(wj), name); err != nil {
+		grantJSON(read), grantJSON(write), name); err != nil {
 		return nil, nil, nil, err
 	}
 	return read, write, warnings, nil

@@ -67,6 +67,10 @@ var migrations = []string{
 	   AND (expires_at IS NULL OR expires_at > unixepoch() + 90*86400);`,
 }
 
+// sqliteDriver is the database/sql driver openDB uses. Tests swap in a
+// wrapper that injects failures to exercise error paths.
+var sqliteDriver = "sqlite"
+
 // dbDSN is the connection string shared by the server and the admin CLI.
 // _txlock=immediate takes the write lock at BEGIN so two processes
 // migrating the same file at once serialize instead of deadlocking.
@@ -81,7 +85,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err := ensureDBFile(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dbDSN(path))
+	db, err := sql.Open(sqliteDriver, dbDSN(path))
 	if err != nil {
 		return nil, err
 	}

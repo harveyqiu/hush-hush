@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -37,41 +34,32 @@ func cmdBackup(args []string, stdout, stderr io.Writer) error {
 	toStdout := *out == "-"
 	dst := filepath.Clean(*out)
 	if toStdout {
-		b := make([]byte, 8)
-		if _, err := rand.Read(b); err != nil {
-			return err
-		}
-		dst = filepath.Join(filepath.Dir(*dbPath), ".backup-"+hex.EncodeToString(b)+".db")
-	}
-	if _, err := os.Stat(dst); err == nil {
-		return fmt.Errorf("backup: %s already exists", dst)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("backup: %w", err)
+		dst = filepath.Join(filepath.Dir(*dbPath), ".backup-"+randomHex(8)+".db")
 	}
 	db, err := openAdminDB(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	if toStdout {
-		defer func() { _ = os.Remove(dst) }()
-	}
-	if _, err := db.ExecContext(context.Background(), `VACUUM INTO ?`, dst); err != nil {
+
+	// Create the destination empty and owner-only first: O_EXCL refuses an
+	// existing file without a check-then-create race, the copy is never
+	// readable by others, and VACUUM INTO accepts an empty existing file.
+	f, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- operator-chosen path
+	if err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}
-	// The copy holds the same ciphertexts and token hashes as the live DB.
-	if err := os.Chmod(dst, 0o600); err != nil {
+	defer f.Close()
+	if _, err := db.ExecContext(context.Background(), `VACUUM INTO ?`, dst); err != nil {
+		_ = os.Remove(dst)
 		return fmt.Errorf("backup: %w", err)
 	}
 	if !toStdout {
 		fmt.Fprintf(stdout, "backup written to %s (store it apart from the master key)\n", dst)
 		return nil
 	}
-	f, err := os.Open(dst) // #nosec G304 -- path generated above, next to the DB
-	if err != nil {
-		return fmt.Errorf("backup: %w", err)
-	}
-	defer f.Close()
+	defer func() { _ = os.Remove(dst) }()
+	// f still points at offset 0 of the file SQLite just filled.
 	if _, err := io.Copy(stdout, f); err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}

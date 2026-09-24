@@ -27,7 +27,12 @@ jobs:
       - run: go mod verify
       - run: go build ./...
       - run: go vet ./...
-      - run: go test -coverprofile=coverage.out ./...
+      - run: go test -race -coverprofile=coverage.out ./...
+      - name: Coverage gate (>= 99% of statements)
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%", "", $3); print $3}')
+          echo "total statement coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit !(t >= 99.0) }'
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:

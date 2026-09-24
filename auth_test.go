@@ -240,10 +240,7 @@ func TestMigrate_V010Database(t *testing.T) {
 		if version != len(migrations) {
 			t.Errorf("schema version = %d, want %d", version, len(migrations))
 		}
-		s, err := newServer(db, testKey())
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := newServer(db, testKey())
 		if i == 0 {
 			mustInsertToken(t, s, tokenSpec{name: "admin", role: roleAdmin}, testToken)
 		}

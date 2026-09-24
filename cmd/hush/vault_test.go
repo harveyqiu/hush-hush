@@ -40,10 +40,7 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 	plaintext := []byte("hunter2")
 	aad := []byte("secret-name")
 
-	wire, err := encryptWireFormat(key, plaintext, aad)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
+	wire := encryptWireFormat(key, plaintext, aad)
 	if !strings.HasPrefix(wire, vaultPrefix) {
 		t.Errorf("wire missing %q prefix: %q", vaultPrefix, wire)
 	}
@@ -64,14 +61,8 @@ func TestEncrypt_NonceIsRandom(t *testing.T) {
 	key := make([]byte, keyBytes)
 	_, _ = rand.Read(key)
 
-	a, err := encryptWireFormat(key, []byte("v"), []byte("aad"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := encryptWireFormat(key, []byte("v"), []byte("aad"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := encryptWireFormat(key, []byte("v"), []byte("aad"))
+	b := encryptWireFormat(key, []byte("v"), []byte("aad"))
 	if a == b {
 		t.Errorf("two encryptions of the same input produced identical ciphertext — nonce not randomized?")
 	}
@@ -80,12 +71,9 @@ func TestEncrypt_NonceIsRandom(t *testing.T) {
 func TestDecrypt_WrongAADRejected(t *testing.T) {
 	key := make([]byte, keyBytes)
 	_, _ = rand.Read(key)
-	wire, err := encryptWireFormat(key, []byte("v"), []byte("name-A"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire := encryptWireFormat(key, []byte("v"), []byte("name-A"))
 	// Same key, different AAD — the row-rebinding defense.
-	_, err = decryptWireFormat(key, wire, []byte("name-B"))
+	_, err := decryptWireFormat(key, wire, []byte("name-B"))
 	if !errors.Is(err, errBadPassphrase) {
 		// Note: errBadPassphrase is returned for any AEAD tag failure;
 		// in practice the CLI would re-prompt, but the underlying
@@ -481,9 +469,12 @@ func isUnix() bool {
 }
 
 func TestEncrypt_RejectsWrongKeySize(t *testing.T) {
-	if _, err := encryptWireFormat(make([]byte, 16), []byte("v"), nil); err == nil {
-		t.Error("expected error on 16-byte key")
-	}
+	defer func() {
+		if recover() == nil {
+			t.Error("expected a panic on a 16-byte key")
+		}
+	}()
+	encryptWireFormat(make([]byte, 16), []byte("v"), nil)
 }
 
 func TestDecrypt_RejectsWrongKeySize(t *testing.T) {
@@ -491,26 +482,20 @@ func TestDecrypt_RejectsWrongKeySize(t *testing.T) {
 	// try to decrypt with a wrong-sized key.
 	good := make([]byte, keyBytes)
 	_, _ = rand.Read(good)
-	wire, err := encryptWireFormat(good, []byte("v"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wire := encryptWireFormat(good, []byte("v"), nil)
 	if _, err := decryptWireFormat(make([]byte, 16), wire, nil); err == nil {
 		t.Error("expected error on 16-byte key")
 	}
 }
 
 func TestNewSalt_ReturnsRequestedSize(t *testing.T) {
-	s, err := newSalt()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newSalt()
 	if len(s) != vaultSaltBytes {
 		t.Errorf("got %d bytes, want %d", len(s), vaultSaltBytes)
 	}
 	// Two calls should return distinct values (probabilistic but
 	// astronomically unlikely to coincide for a 128-bit salt).
-	s2, _ := newSalt()
+	s2 := newSalt()
 	if bytes.Equal(s, s2) {
 		t.Error("two newSalt calls returned identical bytes")
 	}

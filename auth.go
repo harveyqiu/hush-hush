@@ -131,31 +131,15 @@ type tokenSpec struct {
 // insertToken stores the SHA-256 of plaintext; the plaintext itself never
 // reaches the database.
 func insertToken(ctx context.Context, db dbtx, spec tokenSpec, plaintext string, now time.Time) error {
-	prefixes := spec.prefixes
-	if prefixes == nil {
-		prefixes = []string{}
-	}
-	pj, err := json.Marshal(prefixes)
-	if err != nil {
-		return err
-	}
-	wp := spec.writePrefixes
-	if wp == nil {
-		wp = []string{}
-	}
-	wj, err := json.Marshal(wp)
-	if err != nil {
-		return err
-	}
 	var exp sql.NullInt64
 	if spec.expiresAt != nil {
 		exp = sql.NullInt64{Int64: spec.expiresAt.Unix(), Valid: true}
 	}
 	h := hashToken(plaintext)
-	_, err = db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO tokens (name, token_hash, role, prefixes, write_prefixes, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		spec.name, h[:], spec.role, string(pj), string(wj), exp, now.Unix())
+		spec.name, h[:], spec.role, grantJSON(spec.prefixes), grantJSON(spec.writePrefixes), exp, now.Unix())
 	return err
 }
 

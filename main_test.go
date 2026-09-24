@@ -36,10 +36,7 @@ func newTestServer(t *testing.T) (*server, http.Handler) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	s, err := newServer(db, testKey())
-	if err != nil {
-		t.Fatalf("newServer: %v", err)
-	}
+	s := newServer(db, testKey())
 	// testToken is a named admin token in the tokens table, the way a
 	// real deployment's admin credential is provisioned.
 	exp := time.Now().Add(30 * 24 * time.Hour) // admin tokens always expire
@@ -339,7 +336,9 @@ func TestPut_UpsertPreservesCreatedAt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("first PUT: %d", rr.Code)
 	}
-	var first struct{ CreatedAt int64 `json:"created_at"` }
+	var first struct {
+		CreatedAt int64 `json:"created_at"`
+	}
 	if err := json.NewDecoder(rr.Body).Decode(&first); err != nil {
 		t.Fatalf("decode first: %v", err)
 	}
@@ -349,7 +348,9 @@ func TestPut_UpsertPreservesCreatedAt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("second PUT: %d", rr.Code)
 	}
-	var second struct{ CreatedAt int64 `json:"created_at"` }
+	var second struct {
+		CreatedAt int64 `json:"created_at"`
+	}
 	if err := json.NewDecoder(rr.Body).Decode(&second); err != nil {
 		t.Fatalf("decode second: %v", err)
 	}
