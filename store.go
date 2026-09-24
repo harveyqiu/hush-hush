@@ -38,6 +38,21 @@ var migrations = []string{
 		created_at   INTEGER NOT NULL,
 		last_used_at INTEGER
 	);`,
+
+	// 3: one row per /v1/secrets request. Never holds values or tokens.
+	`CREATE TABLE audit_log (
+		id          INTEGER PRIMARY KEY,
+		ts          INTEGER NOT NULL,
+		token_name  TEXT    NOT NULL DEFAULT '',
+		action      TEXT    NOT NULL,
+		secret_name TEXT    NOT NULL DEFAULT '',
+		result      TEXT    NOT NULL,
+		request_id  TEXT    NOT NULL DEFAULT '',
+		remote_addr TEXT    NOT NULL DEFAULT ''
+	);
+	CREATE INDEX audit_log_ts     ON audit_log (ts);
+	CREATE INDEX audit_log_token  ON audit_log (token_name, ts);
+	CREATE INDEX audit_log_secret ON audit_log (secret_name, ts);`,
 }
 
 // dbDSN is the connection string shared by the server and the admin CLI.

@@ -161,33 +161,14 @@ func (s *server) activeTokenCount() (int, error) {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
-	mux.HandleFunc("GET /v1/secrets", s.requireAuth(s.list))
-	mux.HandleFunc("GET /v1/secrets/{name}", s.requireAuth(s.get))
-	mux.HandleFunc("PUT /v1/secrets/{name}", s.requireAuth(requireAdmin(s.put)))
-	mux.HandleFunc("DELETE /v1/secrets/{name}", s.requireAuth(requireAdmin(s.del)))
+	mux.HandleFunc("GET /v1/secrets", s.secretsRoute(actionList, s.list))
+	mux.HandleFunc("GET /v1/secrets/{name}", s.secretsRoute(actionGet, s.get))
+	mux.HandleFunc("PUT /v1/secrets/{name}", s.secretsRoute(actionPut, requireAdmin(s.put)))
+	mux.HandleFunc("DELETE /v1/secrets/{name}", s.secretsRoute(actionDelete, requireAdmin(s.del)))
 	return mux
 }
 
 type principalKey struct{}
-
-// requireAuth authenticates the caller and stores the principal in the
-// request context. Every credential failure gets the same 401 body so the
-// response never reveals whether a token exists, was revoked, or expired.
-func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := s.authenticate(r.Context(), r)
-		if errors.Is(err, errUnauthenticated) {
-			writeErr(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if err != nil {
-			slog.ErrorContext(r.Context(), "token lookup failed", "error", err)
-			writeErr(w, http.StatusInternalServerError, "db error")
-			return
-		}
-		h(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
-	}
-}
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
