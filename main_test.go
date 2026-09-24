@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -31,20 +32,29 @@ func newTestServer(t *testing.T) (*server, http.Handler) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 
-	if err := initSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
 	}
 
+	s, err := newServer(db, testKey(), "")
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	// testToken is a named admin token in the tokens table, the way a
+	// real deployment's admin credential is provisioned.
+	if err := insertToken(context.Background(), db,
+		tokenSpec{name: "test-admin", role: roleAdmin}, testToken, time.Now()); err != nil {
+		t.Fatalf("insert admin token: %v", err)
+	}
+	return s, s.routes()
+}
+
+func testKey() []byte {
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-
-	s, err := newServer(db, key, testToken)
-	if err != nil {
-		t.Fatalf("newServer: %v", err)
-	}
-	return s, s.routes()
+	return key
 }
 
 // authReq builds an authenticated request. body=nil for GET/DELETE.

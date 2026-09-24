@@ -6,10 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,9 +43,19 @@ var nameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,128}$`)
 var requestIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 type server struct {
-	db            *sql.DB
-	gcm           cipher.AEAD
-	authTokenHash [32]byte
+	db  *sql.DB
+	gcm cipher.AEAD
+	// legacyTokenHash is set only when the deprecated AUTH_TOKEN env var
+	// is in use; it then authenticates as an admin.
+	legacyTokenHash *[32]byte
+	now             func() time.Time
+	// tokenLimiter is keyed by authenticated token name; ipLimiter by
+	// client IP and consumed only by requests that fail authentication.
+	tokenLimiter *rateLimiter
+	ipLimiter    *rateLimiter
+	// trustProxy makes clientIP honour X-Forwarded-For from a loopback
+	// peer (the co-located reverse proxy).
+	trustProxy bool
 }
 
 type secretRow struct {
@@ -58,7 +65,9 @@ type secretRow struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-func main() {
+// serve runs the HTTP API until SIGINT/SIGTERM. It is the default when the
+// binary is started without a subcommand, preserving v0.1.0 behaviour.
+func serve() {
 	// JSON to stdout — Railway's log viewer parses it; jq-friendly locally.
 	// contextHandler picks up request_id from r.Context() so handlers don't
 	// have to thread it manually.
@@ -66,40 +75,39 @@ func main() {
 		Handler: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 	}))
 
-	keyB64 := mustEnv("MASTER_KEY")
-	token := mustEnv("AUTH_TOKEN")
-	dbPath := getenv("DB_PATH", "./hush.db")
-	port := getenv("PORT", "8080")
-
-	key, err := base64.StdEncoding.DecodeString(keyB64)
+	cfg, err := loadConfig(os.Getenv, os.ReadFile)
 	if err != nil {
-		fatal("MASTER_KEY: invalid base64", "error", err)
+		fatal("invalid configuration", "error", err)
 	}
-	if len(key) != 32 {
-		fatal("MASTER_KEY: must decode to 32 bytes", "got", len(key))
+	for _, w := range cfg.warnings {
+		slog.Warn(w)
 	}
+	dbPath := cfg.dbPath
 
-	db, err := sql.Open("sqlite",
-		dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := openDB(dbPath)
 	if err != nil {
-		fatal("sqlite open failed", "error", err)
+		fatal("database open failed", "error", err)
 	}
 	defer db.Close()
-	// SQLite serializes writers; capping the pool at 1 avoids spurious
-	// SQLITE_BUSY at the database/sql layer for a single-user workload.
-	db.SetMaxOpenConns(1)
+	checkDBPerms(dbPath)
 
-	if err := initSchema(db); err != nil {
-		fatal("schema init failed", "error", err)
-	}
-
-	s, err := newServer(db, key, token)
+	s, err := newServer(db, cfg.key, cfg.legacyToken)
 	if err != nil {
 		fatal("server init failed", "error", err)
 	}
+	// The cipher has its own expanded copy; drop ours.
+	clear(cfg.key)
+	s.tokenLimiter = newRateLimiter(cfg.rateLimitPerMinute)
+	s.ipLimiter = newRateLimiter(cfg.unauthRateLimitPerMinute)
+	s.trustProxy = cfg.trustProxy
+	if n, err := s.activeTokenCount(); err != nil {
+		fatal("token count failed", "error", err)
+	} else if n == 0 && cfg.legacyToken == "" {
+		slog.Warn("no active tokens: every API request will be rejected until one is created with `token create`")
+	}
 
 	srv := &http.Server{
-		Addr:              ":" + port,
+		Addr:              cfg.listenAddr,
 		Handler:           withRequestID(s.routes()),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -111,7 +119,12 @@ func main() {
 	defer stop()
 
 	go func() {
-		slog.Info("listening", "port", port, "db_path", dbPath)
+		// key_source says where the key came from; the key itself is
+		// never logged.
+		slog.Info("listening", "addr", cfg.listenAddr, "db_path", dbPath,
+			"key_source", cfg.keySource, "trust_proxy_headers", cfg.trustProxy,
+			"rate_limit_per_minute", cfg.rateLimitPerMinute,
+			"unauth_rate_limit_per_minute", cfg.unauthRateLimitPerMinute)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fatal("listen failed", "error", err)
 		}
@@ -130,7 +143,8 @@ func main() {
 // newServer constructs a server from already-validated dependencies.
 // Extracted from main() so tests can build a server against an in-memory
 // database without parsing env vars or duplicating crypto setup.
-func newServer(db *sql.DB, key []byte, token string) (*server, error) {
+// legacyToken is the deprecated AUTH_TOKEN value, or "" when unset.
+func newServer(db *sql.DB, key []byte, legacyToken string) (*server, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -139,69 +153,69 @@ func newServer(db *sql.DB, key []byte, token string) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{
-		db:            db,
-		gcm:           gcm,
-		authTokenHash: sha256.Sum256([]byte(token)),
-	}, nil
+	s := &server{
+		db:           db,
+		gcm:          gcm,
+		now:          time.Now,
+		tokenLimiter: newRateLimiter(defaultRateLimitPerMinute),
+		ipLimiter:    newRateLimiter(defaultUnauthRateLimitPerMinute),
+	}
+	if legacyToken != "" {
+		slog.Warn("AUTH_TOKEN is deprecated: it is accepted as an admin token but cannot be scoped or revoked individually; create named tokens with `token create` and unset AUTH_TOKEN")
+		h := hashToken(legacyToken)
+		s.legacyTokenHash = &h
+	}
+	return s, nil
+}
+
+func (s *server) activeTokenCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tokens
+		WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+		s.now().Unix()).Scan(&n)
+	return n, err
 }
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
-	mux.HandleFunc("GET /v1/secrets", s.requireAuth(s.list))
-	mux.HandleFunc("GET /v1/secrets/{name}", s.requireAuth(s.get))
-	mux.HandleFunc("PUT /v1/secrets/{name}", s.requireAuth(s.put))
-	mux.HandleFunc("DELETE /v1/secrets/{name}", s.requireAuth(s.del))
+	mux.HandleFunc("GET /v1/secrets", s.secretsRoute(actionList, s.list))
+	mux.HandleFunc("GET /v1/secrets/{name}", s.secretsRoute(actionGet, s.get))
+	mux.HandleFunc("PUT /v1/secrets/{name}", s.secretsRoute(actionPut, requireAdmin(s.put)))
+	mux.HandleFunc("DELETE /v1/secrets/{name}", s.secretsRoute(actionDelete, requireAdmin(s.del)))
 	return mux
 }
 
-func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS secrets (
-			name       TEXT PRIMARY KEY,
-			ciphertext BLOB NOT NULL,
-			nonce      BLOB NOT NULL,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		);
-	`)
-	return err
-}
-
-func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeErr(w, http.StatusUnauthorized, "missing bearer token")
-			return
-		}
-		// Hash both sides so the compared slices are always 32 bytes;
-		// ConstantTimeCompare short-circuits on length mismatch and would
-		// otherwise leak the real token's length via timing.
-		//
-		// TrimSpace handles benign client mistakes (extra space after the
-		// scheme, trailing whitespace) per RFC 7230 §3.2.4 — without it,
-		// "Bearer  token" reaches the compare as " token" and silently
-		// 401s with a misleading "invalid token" instead of succeeding.
-		given := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		givenHash := sha256.Sum256([]byte(given))
-		if subtle.ConstantTimeCompare(givenHash[:], s.authTokenHash[:]) != 1 {
-			writeErr(w, http.StatusUnauthorized, "invalid token")
-			return
-		}
-		h(w, r)
-	}
-}
+type principalKey struct{}
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT name, created_at, updated_at FROM secrets ORDER BY name LIMIT ?`,
-		listLimit)
+	p := principalFrom(r.Context())
+	all, prefixes := p.grantedPrefixes()
+	if !all && len(prefixes) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"secrets": []secretRow{}})
+		return
+	}
+	// Agents get the prefix filter in SQL so LIMIT applies to what they
+	// may see. substr() rather than LIKE: '_' is a LIKE wildcard and is
+	// also a legal prefix separator.
+	query := `SELECT name, created_at, updated_at FROM secrets`
+	var args []any
+	if !all {
+		conds := make([]string, len(prefixes))
+		for i, pre := range prefixes {
+			conds[i] = `substr(name, 1, ?) = ?`
+			args = append(args, len(pre), pre)
+		}
+		query += ` WHERE ` + strings.Join(conds, ` OR `) // #nosec G202 -- joins constant placeholders only; values are bound as args
+	}
+	query += ` ORDER BY name LIMIT ?`
+	args = append(args, listLimit)
+
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list query failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "db error")
@@ -217,6 +231,10 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "db error")
 			return
 		}
+		// Belt and braces: the SQL filter should already guarantee this.
+		if !p.canRead(sr.Name) {
+			continue
+		}
 		out = append(out, sr)
 	}
 	if err := rows.Err(); err != nil {
@@ -231,6 +249,12 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !nameRe.MatchString(name) {
 		writeErr(w, http.StatusBadRequest, "invalid name")
+		return
+	}
+	// Checked before the lookup so an agent gets 403 for every name outside
+	// its grant, existing or not; 404 would let it probe for names.
+	if !principalFrom(r.Context()).canRead(name) {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	var ct, nonce []byte
@@ -365,8 +389,8 @@ func (s *server) del(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid name")
 		return
 	}
-	// Idempotent: a network retry of a successful DELETE should not
-	// surface as an error. We don't distinguish "deleted" from "wasn't
+	// Idempotent (admin only; agents are stopped by requireAdmin): a
+	// network retry of a successful DELETE should not surface as an error. We don't distinguish "deleted" from "wasn't
 	// there" — both end states are identical.
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM secrets WHERE name = ?`, name); err != nil {
 		slog.ErrorContext(r.Context(), "delete exec failed", "name", name, "error", err)
