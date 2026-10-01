@@ -1,0 +1,82 @@
+name: deploy
+
+# DISABLED until the repository variable DEPLOY_ENABLED is set to "true".
+# While it is unset every trigger below is skipped: no secrets are read and
+# nothing is deployed. Deleting the variable is also the emergency stop.
+#
+# To enable:
+#   1. worker/wrangler.jsonc: replace REPLACE_WITH_D1_DATABASE_ID with the id
+#      printed by `wrangler d1 create hush`, and commit it (it is not secret).
+#   2. Settings > Environments > New environment "production". Turn on
+#      "Required reviewers" so every deploy needs a human click.
+#   3. In that environment add the secrets CLOUDFLARE_API_TOKEN and
+#      CLOUDFLARE_ACCOUNT_ID. Give the token only "Workers Scripts: Edit" and
+#      "D1: Edit" on this one account.
+#   4. Settings > Secrets and variables > Actions > Variables: add
+#      DEPLOY_ENABLED = true.
+#   5. Once, by hand (not from CI): `wrangler secret put MASTER_KEY` and
+#      `npm run token:bootstrap`. Deploys never touch secrets, so MASTER_KEY
+#      survives them.
+#
+# Anyone who can push to main can ship code that reads MASTER_KEY, so protect
+# main with a branch rule before enabling this. Never add a pull_request
+# trigger: PRs from forks must not get these credentials.
+#
+# Migrations run BEFORE the new code goes live, so each one has to work with
+# the previous release too (add columns/tables; do not drop or rename in the
+# same release that stops using them).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; never cancel one that is already running.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy to Cloudflare
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    environment: production
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Refuse to deploy with the placeholder database id
+        run: |
+          if grep -q REPLACE_WITH_D1_DATABASE_ID wrangler.jsonc; then
+            echo "::error file=worker/wrangler.jsonc::database_id is still the placeholder; see the header of .github/workflows/deploy.yml"
+            exit 1
+          fi
+      - run: npm ci
+      # Same gate as the worker workflow: never ship what doesn't pass.
+      - run: npm run typecheck
+      - run: npm test
+      # The Cloudflare credentials are given only to the two steps that need
+      # them, not to npm ci or the tests (which run third-party code).
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply DB --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Deploy
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

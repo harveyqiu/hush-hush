@@ -1,5 +1,7 @@
 # hush-hush 功能规格（基于 Go 版实现整理）
 
+> **说明**：Go 版源码已从仓库移除，最后包含它的提交是 `e9d00a1`（`git show e9d00a1:main.go`）。下文括号里的 `main.go`、`auth.go` 等文件名指向那个提交。当前实现是 `worker/`，它按本文实现；与本文有出入之处记录在 [workers-migration.md](workers-migration.md) 的"已知差异"里。第 1、10 节提到的 `hush` 客户端和服务端管理 CLI 同样只存在于该提交中，当前版本没有。
+
 本文描述 Go 版**当前实际行为**，作为 Workers + D1 重写的唯一依据。与语言无关；每一条都能在 Go 源码中找到对应（括号内为文件）。如果重写与本文有出入，以本文为准，并在 [workers-migration.md](workers-migration.md) 的"已知差异"中登记。
 
 ## 1. 产品定位
@@ -11,9 +13,9 @@
 | 组件 | 位置 | 与重写的关系 |
 |---|---|---|
 | 服务端 API | `main.go` `auth.go` `tokens.go` `admin.go` `audit.go` | **重写** |
-| 管理 UI（原生 JS，无构建） | `ui/` | **原样复用** |
+| 管理 UI（原生 JS，无构建） | `ui/`（现为 `worker/public/ui/`） | **原样复用** |
 | 服务端管理 CLI（`token` / `audit` / `backup` / `audit-prune` / `healthcheck`） | `cli.go` `audit_cli.go` `maint.go` `healthcheck.go` | 无本地 DB 文件，需用别的方式替代 |
-| 客户端 CLI `hush`（get/put/list/delete/init/migrate） | `cmd/hush/` | **不改**，只依赖 HTTP 契约 |
+| 客户端 CLI `hush`（get/put/list/delete/init/migrate），含 v2 客户端加密 | `cmd/hush/` | 重写时对它保持 HTTP 契约兼容；**之后随 Go 代码一并移除**，当前仓库没有客户端 |
 
 ## 2. 数据模型（SQLite，`store.go`）
 

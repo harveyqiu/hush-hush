@@ -1,6 +1,6 @@
 # Agent 接入指南
 
-本文面向调用 hush-hush 的程序和 LLM agent：怎么拿到 secret、每个状态码代表什么、出错时怎么处理。部署和管理 token 见 [`docker.md`](docker.md)。
+本文面向调用 hush-hush 的程序和 LLM agent：怎么拿到 secret、每个状态码代表什么、出错时怎么处理。部署和管理 token 见 [`worker/README.md`](../worker/README.md)。
 
 ## 1. 你需要的两样东西
 
@@ -69,14 +69,14 @@ curl -sS -X PUT "$HUSH_URL/v1/secrets/crawler.session" \
 - 前缀匹配是纯字符串前缀：前缀 `llm.` 能读 `llm.openai`，但不能读 `llmx.key` 或 `llm`。
 - 值：非空字符串，最大 64 KiB。
 - `PUT` 必须带 `Content-Type: application/json`，请求体只能是 `{"value":"..."}`，多余字段或多余内容都会被拒绝。
-- 以 `hh2:` 开头的值是经 `hush` CLI 客户端加密的密文，原样返回给你。没有对应的 vault 口令就解不开，这种情况请联系管理员。
+- 以 `hh2:` 开头的值是旧版 Go 命令行客户端在客户端加密的密文（从旧库迁移过来才会有），服务端原样返回。该客户端已随 Go 代码移除，没有对应的 vault 口令就解不开，这种情况请联系管理员。
 
 ## 5. 状态码和处理方式
 
 | 状态码 | `error` | 含义 | 你该怎么做 |
 |---|---|---|---|
 | 200 | – | 成功 | – |
-| 400 | `invalid name` / `invalid json` / `value required` / `trailing data after json` / `read body` | 请求本身有误 | 修正请求，**不要重试** |
+| 400 | `invalid name` / `invalid json` / `value required` / `read body` | 请求本身有误 | 修正请求，**不要重试** |
 | 401 | `unauthorized` | token 缺失、错误、已吊销或已过期（服务端不区分） | **不要重试**，停下并通知管理员 |
 | 403 | `forbidden` | 名称不在你的授权范围内，或者你执行了不允许的操作（写入范围外的名称、删除） | **不要重试**。检查名称是否拼错；确实需要的话，请管理员调整授权 |
 | 404 | `not found` | 在授权范围内，但这个 secret 不存在 | 不要重试。注意：授权范围**外**的名称永远返回 403，不是 404 |

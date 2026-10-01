@@ -1,6 +1,6 @@
 # Workers + D1 版设计与迁移
 
-目标：把 [functional-spec.md](functional-spec.md) 描述的服务整套跑在 Cloudflare 上（Workers + D1 + Durable Objects），代码在 `worker/`。Go 版保持不动，二者共存。
+目标：把 [functional-spec.md](functional-spec.md) 描述的服务整套跑在 Cloudflare 上（Workers + D1 + Durable Objects），代码在 `worker/`。Go 版源码后来已从仓库移除，保留在 git 历史里（最后包含它的提交是 `e9d00a1`），所以下文凡是"Go 版"都指那个提交；§6 的迁移路径和 §7 里涉及 Go 的验证，是当时对照真实 Go 构建做的。
 
 ## 1. 机制映射
 

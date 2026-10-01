@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted — shipped via PRs [#13](https://github.com/cjunks94/hush-hush/pull/13), [#14](https://github.com/cjunks94/hush-hush/pull/14), [#15](https://github.com/cjunks94/hush-hush/pull/15) (2026-05-23 / 2026-05-24).
+**Superseded in practice.** The design below was implemented in the Go `hush` CLI (`cmd/hush/vault.go`). That CLI was removed together with the Go server when the project moved to Cloudflare Workers + D1, so the repository no longer ships any client-side encryption. The last commit containing the implementation is `e9d00a1`; this record is kept for the reasoning, and as the starting point if a client is rewritten.
+
+Originally: accepted — shipped via PRs [#13](https://github.com/cjunks94/hush-hush/pull/13), [#14](https://github.com/cjunks94/hush-hush/pull/14), [#15](https://github.com/cjunks94/hush-hush/pull/15) (2026-05-23 / 2026-05-24).
 
 ## Context
 

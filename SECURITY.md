@@ -4,11 +4,7 @@
 
 **Please do not open public issues for security problems.**
 
-Use GitHub's private vulnerability reporting:
-
-1. Go to **[Report a vulnerability](https://github.com/cjunks94/hush-hush/security/advisories/new)**
-2. Describe the issue with reproduction steps if possible
-3. You'll get an acknowledgement within 7 days; we'll discuss the fix and disclosure timeline together
+Use GitHub's private vulnerability reporting: open this repository's **Security** tab, choose **Report a vulnerability**, and describe the issue with reproduction steps if possible. You'll get an acknowledgement within 7 days; we'll discuss the fix and disclosure timeline together.
 
 ## Supported versions
 
@@ -21,34 +17,32 @@ This is an active personal project; only the latest commit on `main` is supporte
 
 ## In scope
 
-- The Go HTTP server in `main.go` — auth, crypto, validation, headers, log injection vectors
-- Dependencies in `go.mod` — already scanned weekly via `govulncheck`
-- The CI workflow in `.github/workflows/security.yml`
+- The Worker in `worker/src`: authentication, authorization, crypto, validation, headers, log injection vectors
+- The admin UI in `worker/public/ui`
+- Dependencies in `worker/package.json` and the GitHub Actions workflows in `.github/workflows`
 
 ## Out of scope
 
-This is a deliberately minimal self-hosted tool for one operator and a handful of agents. The following are documented trade-offs in the [threat model](README.md#threat-model), not vulnerabilities:
+This is a deliberately minimal tool for one operator and a handful of agents. The following are documented trade-offs in the [threat model](README.md#threat-model), not vulnerabilities:
 
-- **Server-side encryption**: the master key is loaded into the server process (Docker secret file or env var); host compromise exposes both key and ciphertext. Protects against backup / volume-snapshot leaks, not host compromise.
+- **Server-side encryption**: the master key is a Worker secret. Anyone who can deploy code to the Worker, read its secrets, or administer the Cloudflare account has both the key and the ciphertext. It protects against leaked database exports and backups, not against account compromise.
 - **Agents see plaintext values**: an agent token can read the values under its prefixes. Access control limits *which* secrets an agent gets, not what it does with them.
-- **Docker-level bypass**: anyone with access to the Docker daemon, the data volume plus the key file, or host root can read everything directly, skipping tokens, prefixes and the audit log. Agents must not have Docker access; see [`docs/docker.md`](docs/docker.md).
+- **Cloudflare-level bypass**: anyone with access to the D1 database plus the Worker secrets can read everything directly, skipping tokens, prefixes and the audit log. Agents must never have Cloudflare account access.
 - **Agent-created secrets**: an agent with write prefixes can create new names there (never overwrite or delete). Anything that reads that namespace should treat those values as agent-supplied.
-- **In-memory rate limits** reset on restart.
-- **Audit `remote_addr` is advisory** for callers on the same host: with `TRUSTED_PROXIES` covering the Docker gateway (the compose default), any local process that reaches the published port can set its own `X-Forwarded-For`.
-- **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; admin tokens are for humans and always expire (at most 90 days, enforced on create and at authentication); set `ADMIN_API=false` if you only manage tokens from the CLI. Every admin call is audited.
+- **Rate limiting fails open**: if the rate-limit Durable Object is unavailable, requests are allowed (and an error is logged). Tokens are 256-bit random values, so the limiter is abuse control, not the authentication boundary.
+- **Audit `remote_addr`** comes from `CF-Connecting-IP`, which Cloudflare sets at its edge.
+- **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; admin tokens are for humans and always expire (at most 90 days, enforced on create and at authentication); set `ADMIN_API=false` to remove the admin API and UI entirely. Every admin call is audited.
+- **No master-key rotation** and no key escrow: losing `MASTER_KEY` makes stored values unrecoverable.
 
-If your use case requires any of those properties, please pick a different tool — see the [README's "What this isn't" section](README.md#what-this-isnt).
+If your use case requires any of those properties, please pick a different tool; see the [README's "What this isn't" section](README.md#what-this-isnt).
 
 ## Security tooling
 
-The following run in CI on every push, PR, and weekly Mon 06:00 UTC cron:
-
 | Tool | Purpose |
 |---|---|
-| [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) | Stdlib + dependency CVE scan against the live Go vuln DB |
-| [`gosec`](https://github.com/securego/gosec) | Static security analysis (medium+ severity) |
-| [`gitleaks`](https://github.com/gitleaks/gitleaks) | Scans git history for committed secrets |
-| Dependabot | Weekly grouped dependency updates |
+| [`gitleaks`](https://github.com/gitleaks/gitleaks) | Scans git history for committed secrets, on every push, PR and weekly |
+| Type check, test suite, `wrangler deploy --dry-run` | Run on every PR ([`worker.yml`](.github/workflows/worker.yml)) |
+| Dependabot | Weekly grouped updates for npm and GitHub Actions |
 | [CodeRabbit](https://coderabbit.ai) | Per-PR agentic review |
 
-Tool versions are pinned (specific tags / commit SHAs) to defeat `@latest` supply-chain drift; Dependabot opens PRs to bump them as new releases ship.
+Third-party actions are pinned to a commit SHA to defeat floating-tag supply-chain drift; Dependabot opens PRs to bump them.
