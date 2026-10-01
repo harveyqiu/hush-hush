@@ -23,6 +23,29 @@ updates:
           - patch
           - minor
 
+  # Workers port (wrangler, vitest, typescript; no runtime dependencies)
+  - package-ecosystem: npm
+    directory: /worker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - worker
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      worker-deps:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
   # GitHub Actions workflow dependencies
   - package-ecosystem: github-actions
     directory: /
