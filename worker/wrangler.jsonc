@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hush-hush",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "observability": { "enabled": true },
+
+  // Create the database with `wrangler d1 create hush` and paste its id here.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hush",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Token-bucket rate limiter: one Durable Object per key.
+  "durable_objects": {
+    "bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }],
+
+  // Admin UI. The Worker runs first so it can add the security headers.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+
+  // Daily housekeeping: logs token warnings, prunes audit rows when
+  // AUDIT_RETENTION_DAYS is set.
+  "triggers": { "crons": ["17 3 * * *"] },
+
+  // MASTER_KEY is a secret: `wrangler secret put MASTER_KEY`.
+  "vars": {
+    "RATE_LIMIT_PER_MINUTE": "60",
+    "UNAUTH_RATE_LIMIT_PER_MINUTE": "10",
+    "ADMIN_API": "true"
+    // "AUDIT_RETENTION_DAYS": "180"
+  }
+}

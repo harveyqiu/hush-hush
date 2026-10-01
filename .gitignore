@@ -1,23 +1,6 @@
-*.db
-*.db-shm
-*.db-wal
 .env
 .env.*
 !.env.example
-# Compiled binaries — anchor to repo root so the cmd/hush/ source dir isn't excluded.
-/hush-hush
-/hush-hush.exe
-/hush
-/hush.exe
-/dist/
-/tmp/
-
-# Go coverage output
-coverage.out
-coverage.html
 
 # Claude Code per-user settings (shared settings.json may be committed; .local.json must not)
 .claude/settings.local.json
-master_key
-/cmd/hush/hush
-/cmd/hush/hush.exe

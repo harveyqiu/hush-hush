@@ -8,8 +8,8 @@ reviews:
   # Assertive: this is a secret keeper — security trumps brevity.
   profile: assertive
 
-  # We don't gate merges on CodeRabbit's request-changes; the security
-  # workflow + (eventually) GitHub Ruleset is the source of truth.
+  # We don't gate merges on CodeRabbit's request-changes; CI plus (eventually)
+  # a GitHub Ruleset is the source of truth.
   request_changes_workflow: false
 
   high_level_summary: true
@@ -25,59 +25,55 @@ reviews:
 
   # Don't burn review tokens on lockfiles or generated artifacts.
   path_filters:
-    - "!go.sum"
+    - "!**/package-lock.json"
     - "!**/*.lock"
 
   # Path-specific instructions teach CodeRabbit what matters where.
   # Keep these tight — long instructions dilute the signal.
   path_instructions:
-    - path: "main.go"
+    - path: "worker/src/**"
       instructions: |
-        Personal self-hosted secret keeper. Server-side AES-256-GCM is
-        intentional — DO NOT flag the master-key-as-env-var design.
-        Focus on:
-          * AEAD nonce uniqueness (12-byte random per Seal)
-          * AAD binding includes BOTH cryptoVersion byte AND name —
-            any change that decouples them is a downgrade-attack vector
-          * Bearer compare uses SHA-256 + subtle.ConstantTimeCompare
-            (length leak via short-circuit is the failure mode)
-          * SQL queries are parameterized; no string concat
-          * Error messages don't leak internals (DB → "db error",
-            crypto → "decrypt failed")
-          * Cache-Control: no-store on every response (a proxy or CDN may be upstream)
-          * slog uses ErrorContext so request_id flows from middleware
-        Threat model is "personal-dev-secrets" — flag any change that
+        Personal secret keeper on Cloudflare Workers + D1. Server-side
+        AES-256-GCM with the master key as a Worker secret is intentional —
+        DO NOT flag that design. Focus on:
+          * AEAD nonce uniqueness (12-byte random per encrypt)
+          * AAD binding includes BOTH the version byte AND the name — any
+            change that decouples them is a downgrade-attack vector
+          * Bearer tokens are hashed with SHA-256 and compared with a
+            constant-time compare
+          * SQL is parameterized; the only interpolated values are integer
+            literals or constants
+          * Error messages don't leak internals (DB -> "db error",
+            crypto -> "decrypt failed")
+          * Cache-Control: no-store on every API response
+          * Writes commit atomically with their audit row; reads fail closed
+            when the audit row can't be written
+          * 403, never 404, for names outside an agent's grant
+          * No secret value or token in logs, errors or audit rows
+        Threat model is "personal dev secrets" — flag any change that
         broadens it without explicit acknowledgement.
 
-    - path: "main_test.go"
+    - path: "worker/test/**"
       instructions: |
-        Table-driven where possible. Avoid time.Sleep — use the contract
-        the API actually returns (e.g. created_at preservation tested via
-        equality on returned values, not wall-clock waits).
-        Decode JSON responses into typed structs, not strings.Contains —
-        the latter is fragile to encoder formatting changes.
+        Tests run inside workerd via @cloudflare/vitest-pool-workers. Assert
+        on the API's contract (status, body, audit rows), not on internals.
+        Avoid sleeps. Don't commit high-entropy literals: gitleaks flags
+        them (derive test keys at runtime).
 
     - path: ".github/workflows/**"
       instructions: |
-        * Action versions on latest major (Node 24-compatible runtimes)
-        * setup-go quirk: bare "1.25" is a range spec, "1.25.0" is exact;
-          use go-version: stable for security tooling that needs latest
-          patches, go-version-file: go.mod only for the build job that
-          verifies declared-minimum compatibility
+        * Action versions on latest major; third-party actions pinned to a SHA
         * GITHUB_TOKEN permissions stay minimal (contents: read default)
-        * Pin tool versions where possible — @latest can flip a green
-          branch red mid-week as new lints land
+        * deploy.yml must stay gated by vars.DEPLOY_ENABLED, run only on main,
+          never trigger on pull_request, and pass Cloudflare credentials only
+          to the migration and deploy steps
 
     - path: ".github/dependabot.yml"
       instructions: |
         Grouped updates only — ungrouped Dependabot floods the queue
         for a personal project.
 
-  # Tools CodeRabbit runs inline. Keep enabled by default; redundant
-  # with our own CI but provides per-line context in PR comments.
   tools:
-    gosec:
-      enabled: true
     github-checks:
       enabled: true
 
@@ -85,8 +81,5 @@ chat:
   auto_reply: true
 
 knowledge_base:
-  # Learn the user's preferences over time so future reviews mirror
-  # the rationale that's been established (e.g. server-side encryption
-  # is intentional, no CLI yet, deferred items list).
   learnings:
     scope: auto

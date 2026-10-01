@@ -1,8 +1,8 @@
 version: 2
 updates:
-  # Go module dependencies (modernc.org/sqlite + transitive)
-  - package-ecosystem: gomod
-    directory: /
+  # Workers port (wrangler, vitest, typescript; no runtime dependencies)
+  - package-ecosystem: npm
+    directory: /worker
     schedule:
       interval: weekly
       day: monday
@@ -11,12 +11,12 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
-      - go
+      - worker
     commit-message:
       prefix: chore
       include: scope
     groups:
-      go-deps:
+      worker-deps:
         patterns:
           - "*"
         update-types:
@@ -35,22 +35,6 @@ updates:
     labels:
       - dependencies
       - ci
-    commit-message:
-      prefix: chore
-      include: scope
-
-  # Base images in the Dockerfile (golang, distroless)
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "07:00"
-      timezone: America/New_York
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - docker
     commit-message:
       prefix: chore
       include: scope

@@ -1,0 +1,36 @@
+name: worker
+
+# Checks for the Cloudflare Workers port in worker/. Deliberately not
+# path-filtered: if this check is ever made required, a filtered workflow
+# would never report on Go-only PRs and block them.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: worker typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      # Runs inside workerd, with D1 and Durable Objects.
+      - run: npm test
+      # Validates wrangler.jsonc, the bindings and the bundle without
+      # deploying or needing Cloudflare credentials.
+      - name: Deploy dry run
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/worker-dist"
