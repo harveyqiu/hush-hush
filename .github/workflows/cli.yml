@@ -1,0 +1,56 @@
+name: cli
+
+# The hush command-line client in cli/, and its contract with the Worker.
+# Not path-filtered, for the same reason as worker.yml: a filtered workflow
+# never reports on other PRs, which would block them if it is made required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: cli typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      # Includes vectors produced by the original Go client, so a change that
+      # breaks compatibility with existing vaults and hh2: values fails here.
+      - run: npm test
+      - name: Bundle runs on its own
+        run: npm run build && node dist/hush.mjs --version
+
+  e2e:
+    name: cli + worker end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            worker/package-lock.json
+            cli/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - run: npm ci
+        working-directory: cli
+      # Starts a real Worker (wrangler dev, local D1), runs the built CLI against
+      # it, and checks agent scopes and /llm.html.
+      - run: bash cli/scripts/e2e.sh

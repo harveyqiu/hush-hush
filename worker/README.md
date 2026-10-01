@@ -2,7 +2,7 @@
 
 A personal secret store running entirely on Cloudflare (behavior specified in [`../docs/functional-spec.md`](../docs/functional-spec.md); ported from an earlier Go build, now removed): Workers for the API and UI, D1 for storage, a Durable Object for rate limiting. No server to run. How each part maps, and where it deliberately differs from the Go build, is in [`../docs/workers-migration.md`](../docs/workers-migration.md).
 
-Before you deploy, read the trade-off: the ciphertext (D1) and the master key (Worker secret) live in the same Cloudflare account, so anyone who takes over that account gets both. Protect it with hardware-key 2FA and a narrowly scoped API token. There is no client-side encryption layer; agents and admins read plaintext over HTTPS.
+Before you deploy, read the trade-off: the ciphertext (D1) and the master key (Worker secret) live in the same Cloudflare account, so anyone who takes over that account gets both. Protect it with hardware-key 2FA and a narrowly scoped API token. For secrets that must survive that account being compromised, use the client-side encryption in the [`hush` CLI](../cli/README.md); without it, agents and admins read plaintext over HTTPS.
 
 ## Deploy
 
@@ -26,7 +26,7 @@ npm run deploy
 npm run token:bootstrap -- --name owner --expires 30d --remote
 ```
 
-Then open `https://<your-worker>.workers.dev/`, sign in with that token, and create agent tokens in the UI. Programs read secrets over plain HTTP; see [`../docs/agent-guide.md`](../docs/agent-guide.md):
+Then open `https://<your-worker>.workers.dev/`, sign in with that token, and create agent tokens in the UI. Use the [`hush` CLI](../cli/README.md) from your machine, or give an agent the address `https://<your-worker>.workers.dev/llm.html`: a public page, rendered with your real URL, that tells an LLM how to connect and use the API safely (the same guidance for humans is in [`../docs/agent-guide.md`](../docs/agent-guide.md)). Plain HTTP works too:
 
 ```bash
 curl -sS "$HUSH_URL/v1/secrets/llm.openai" -H "Authorization: Bearer $HUSH_TOKEN"
@@ -43,7 +43,7 @@ In `wrangler.jsonc` under `vars`; `MASTER_KEY` is a secret.
 | `MASTER_KEY` (secret) | required | base64 of 32 bytes; same value as the Go version's `MASTER_KEY` if you migrate |
 | `RATE_LIMIT_PER_MINUTE` | 60 | per token |
 | `UNAUTH_RATE_LIMIT_PER_MINUTE` | 10 | failed authentications, per client IP (IPv6 per /64) |
-| `ADMIN_API` | true | `false` removes `/v1/admin/*` and the UI entirely |
+| `ADMIN_API` | true | `false` removes `/v1/admin/*` and the UI entirely (`/llm.html` stays) |
 | `AUDIT_RETENTION_DAYS` | unset | when set, the daily Cron deletes audit rows older than this |
 
 ## Automatic deploy (off by default)

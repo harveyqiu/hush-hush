@@ -17,6 +17,7 @@ import {
   rateLimitedResponse,
   resolveRequestId,
 } from "./http";
+import { llmHeaders, renderLlmPage } from "./llm";
 import { runMaintenance } from "./maintenance";
 import { checkLimit } from "./ratelimit";
 import { resolveSecretsRoute, type Route } from "./secrets";
@@ -147,6 +148,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, requestI
     return method === "GET" || method === "HEAD"
       ? jsonResponse(200, { status: "ok" })
       : errResponse(405, "method not allowed", { Allow: "GET, HEAD" });
+  }
+
+  // Public instructions for LLM agents. Needs no configuration, database or
+  // auth, so it works (and tells an agent how to connect) even when the rest
+  // of the server is misconfigured or the admin API is off.
+  if (path === "/llm.html") {
+    if (method !== "GET" && method !== "HEAD") return errResponse(405, "method not allowed", { Allow: "GET, HEAD" });
+    return new Response(method === "HEAD" ? null : renderLlmPage(url.origin), { headers: llmHeaders() });
   }
 
   const isSecrets = path === "/v1/secrets" || path.startsWith("/v1/secrets/");

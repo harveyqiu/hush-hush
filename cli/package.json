@@ -1,0 +1,24 @@
+{
+  "name": "hush-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Command-line client for hush-hush, with optional client-side encryption",
+  "type": "module",
+  "bin": { "hush": "dist/hush.mjs" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.0.0",
+    "@noble/hashes": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  }
+}

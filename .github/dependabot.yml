@@ -23,6 +23,29 @@ updates:
           - patch
           - minor
 
+  # Command-line client (two runtime dependencies for the crypto: @noble/*)
+  - package-ecosystem: npm
+    directory: /cli
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - cli
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cli-deps:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
   # GitHub Actions workflow dependencies
   - package-ecosystem: github-actions
     directory: /
