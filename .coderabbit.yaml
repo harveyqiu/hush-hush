@@ -53,6 +53,40 @@ reviews:
         Threat model is "personal dev secrets" — flag any change that
         broadens it without explicit acknowledgement.
 
+    - path: "worker/src/llm.ts"
+      instructions: |
+        Public page for LLM agents, rendered per request. It must stay
+        accurate: numbers and patterns come from the constants the API
+        enforces, and test/llm.test.ts checks the status table against the
+        real server. Text nodes are escaped with escapeText; never put request
+        data in an attribute. No scripts. The inline CSS is allowed by its
+        SHA-256 in the CSP, so changing the CSS means updating the hash.
+
+    - path: "cli/src/**"
+      instructions: |
+        Command-line client with opt-in client-side encryption. The vault
+        format is byte-compatible with the earlier Go client, so DO NOT change
+        the KDF, the AEAD, the wire format ("hh2:" + base64(nonce || ct)), the
+        name-as-AAD binding or vault.json without a migration plan and new
+        vectors. Focus on:
+          * the passphrase is never logged, cached, or sent anywhere
+          * unlock happens BEFORE any network request (wrong passphrase must
+            mean zero requests and no state change)
+          * the bearer token is only sent over https (http only for loopback)
+            and never follows a redirect
+          * vault.json and config.json are created 0600, vault with an
+            exclusive create (no overwrite)
+          * KDF cost parameters read from vault.json stay capped
+          * errors never include secret values
+
+    - path: "cli/test/**"
+      instructions: |
+        Tests with the Go fixtures (cli/test/vault.test.ts) are the
+        compatibility contract: they were produced by the original Go client.
+        Don't regenerate them to make a test pass. Avoid identifiers containing
+        key/secret/token/password next to high-entropy literals (gitleaks).
+        Don't use random data where an assertion depends on its content.
+
     - path: "worker/test/**"
       instructions: |
         Tests run inside workerd via @cloudflare/vitest-pool-workers. Assert
@@ -64,6 +98,7 @@ reviews:
       instructions: |
         * Action versions on latest major; third-party actions pinned to a SHA
         * GITHUB_TOKEN permissions stay minimal (contents: read default)
+        * cli.yml and worker.yml stay unfiltered by path
         * deploy.yml must stay gated by vars.DEPLOY_ENABLED, run only on main,
           never trigger on pull_request, and pass Cloudflare credentials only
           to the migration and deploy steps

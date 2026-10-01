@@ -2,6 +2,8 @@
 
 本文面向调用 hush-hush 的程序和 LLM agent：怎么拿到 secret、每个状态码代表什么、出错时怎么处理。部署和管理 token 见 [`worker/README.md`](../worker/README.md)。
 
+> **直接把 LLM agent 指向服务自己的 `https://<你的服务>/llm.html`。** 那是一个公开的英文页面，由服务端渲染并带有真实地址，agent 抓取后无需任何额外说明就知道怎么连接、能调哪些接口、每个状态码怎么处理、怎样安全地使用 secret。本文是同样内容的中文版，给人看。
+
 ## 1. 你需要的两样东西
 
 管理员会给你：
@@ -69,7 +71,7 @@ curl -sS -X PUT "$HUSH_URL/v1/secrets/crawler.session" \
 - 前缀匹配是纯字符串前缀：前缀 `llm.` 能读 `llm.openai`，但不能读 `llmx.key` 或 `llm`。
 - 值：非空字符串，最大 64 KiB。
 - `PUT` 必须带 `Content-Type: application/json`，请求体只能是 `{"value":"..."}`，多余字段或多余内容都会被拒绝。
-- 以 `hh2:` 开头的值是旧版 Go 命令行客户端在客户端加密的密文（从旧库迁移过来才会有），服务端原样返回。该客户端已随 Go 代码移除，没有对应的 vault 口令就解不开，这种情况请联系管理员。
+- 以 `hh2:` 开头的值是 `hush` 命令行客户端（见 [`cli/README.md`](../cli/README.md)）在客户端加密的密文，服务端原样返回、也解不开。只有 `hush get` 加上 vault 口令才能解密，纯 HTTP 拿到的只是密文，这种情况请联系管理员。
 
 ## 5. 状态码和处理方式
 

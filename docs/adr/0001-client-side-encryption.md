@@ -2,7 +2,7 @@
 
 ## Status
 
-**Superseded in practice.** The design below was implemented in the Go `hush` CLI (`cmd/hush/vault.go`). That CLI was removed together with the Go server when the project moved to Cloudflare Workers + D1, so the repository no longer ships any client-side encryption. The last commit containing the implementation is `e9d00a1`; this record is kept for the reasoning, and as the starting point if a client is rewritten.
+**Accepted, and still in force.** The design below was first implemented in the Go `hush` CLI (`cmd/hush/vault.go`). When the project moved to Cloudflare Workers + D1 that CLI was removed (last commit containing it: `e9d00a1`) and then rewritten in TypeScript in [`cli/`](../../cli/) (`cli/src/vault.ts`), keeping the wire format, the KDF parameters and `vault.json` byte-compatible: the TypeScript tests include vectors produced by the Go code, and the two clients were checked against each other on a real server. Where this record says "the CLI" or names Go files, read `cli/src/`. One addition, not in the original design: KDF cost parameters read from `vault.json` are capped (1 GiB, 64 passes, 64 lanes) so a tampered file can't make the client exhaust memory or time.
 
 Originally: accepted — shipped via PRs [#13](https://github.com/cjunks94/hush-hush/pull/13), [#14](https://github.com/cjunks94/hush-hush/pull/14), [#15](https://github.com/cjunks94/hush-hush/pull/15) (2026-05-23 / 2026-05-24).
 

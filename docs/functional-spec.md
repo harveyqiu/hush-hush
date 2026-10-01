@@ -1,6 +1,6 @@
 # hush-hush 功能规格（基于 Go 版实现整理）
 
-> **说明**：Go 版源码已从仓库移除，最后包含它的提交是 `e9d00a1`（`git show e9d00a1:main.go`）。下文括号里的 `main.go`、`auth.go` 等文件名指向那个提交。当前实现是 `worker/`，它按本文实现；与本文有出入之处记录在 [workers-migration.md](workers-migration.md) 的"已知差异"里。第 1、10 节提到的 `hush` 客户端和服务端管理 CLI 同样只存在于该提交中，当前版本没有。
+> **说明**：Go 版源码已从仓库移除，最后包含它的提交是 `e9d00a1`（`git show e9d00a1:main.go`）。下文括号里的 `main.go`、`auth.go` 等文件名指向那个提交。当前实现是 `worker/`，它按本文实现；与本文有出入之处记录在 [workers-migration.md](workers-migration.md) 的"已知差异"里。第 10 节的服务端管理 CLI 只存在于该提交中，当前版本没有。第 1 节的 `hush` 客户端后来用 TypeScript 重写，在 [`cli/`](../cli/)。
 
 本文描述 Go 版**当前实际行为**，作为 Workers + D1 重写的唯一依据。与语言无关；每一条都能在 Go 源码中找到对应（括号内为文件）。如果重写与本文有出入，以本文为准，并在 [workers-migration.md](workers-migration.md) 的"已知差异"中登记。
 
@@ -15,7 +15,7 @@
 | 服务端 API | `main.go` `auth.go` `tokens.go` `admin.go` `audit.go` | **重写** |
 | 管理 UI（原生 JS，无构建） | `ui/`（现为 `worker/public/ui/`） | **原样复用** |
 | 服务端管理 CLI（`token` / `audit` / `backup` / `audit-prune` / `healthcheck`） | `cli.go` `audit_cli.go` `maint.go` `healthcheck.go` | 无本地 DB 文件，需用别的方式替代 |
-| 客户端 CLI `hush`（get/put/list/delete/init/migrate），含 v2 客户端加密 | `cmd/hush/` | 重写时对它保持 HTTP 契约兼容；**之后随 Go 代码一并移除**，当前仓库没有客户端 |
+| 客户端 CLI `hush`（get/put/list/delete/init/migrate），含 v2 客户端加密 | `cmd/hush/` | 服务端重写时对它保持 HTTP 契约兼容；**Go 代码移除后用 TypeScript 重写**，在 `cli/`，与 Go 版 `vault.json` 和 `hh2:` 值字节兼容 |
 
 ## 2. 数据模型（SQLite，`store.go`）
 
@@ -181,6 +181,14 @@ audit_log (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, token_name TEXT NOT NULL
 - `GET /` → 302 `/ui/`；`GET /ui/*` 静态文件（仅 `ADMIN_API=true`）。
 - 响应头：严格 CSP（`default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`）、`X-Frame-Options: DENY`、`nosniff`、`Referrer-Policy: no-referrer`、`COOP: same-origin`、`Cache-Control: no-store`。
 - UI 用粘贴的 admin token 登录，token 存在 sessionStorage，用 Bearer 头调用上面的 API，因此没有 cookie、没有 CSRF 面。UI 只用到 `/v1/secrets*` 与 `/v1/admin/{me,tokens,audit}`，路径全是相对的。
+
+### 9.9 `GET /llm.html`（新增，Go 版没有）
+写给 LLM agent 的公开页面：怎么连接、能调哪些接口、每个状态码怎么处理、怎样安全使用 secret。
+- 无认证、不审计、不限流，不依赖数据库和 `MASTER_KEY`，`ADMIN_API=false` 时仍然存在。只接受 GET / HEAD，其他方法 405 + `Allow: GET, HEAD`。
+- **在服务端渲染**，把请求实际使用的地址写进 HTML。agent 抓取页面时通常不执行 JavaScript，靠前端脚本填地址会让它只看到占位符。
+- 页面里的数字和模式（名称规则、值大小上限、列表上限、默认限流）取自服务端强制执行的同一组常量；测试会对着真实服务器逐条验证页面里的状态码表。
+- 响应头：`Content-Type: text/html; charset=utf-8`、`Cache-Control: public, max-age=300`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`；CSP 为 `default-src 'none'`，只放行页面内联样式的 SHA-256，没有脚本。
+- 文本节点只转义 `& < >`（引号保持原样，方便抓取原始 HTML 的 agent 阅读和复制示例）；请求里的任何内容都不会进入属性。
 
 ## 10. 管理 CLI（Go 版直接操作 DB 文件）
 

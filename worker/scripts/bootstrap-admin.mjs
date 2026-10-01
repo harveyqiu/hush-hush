@@ -5,6 +5,7 @@
 //
 //   node scripts/bootstrap-admin.mjs --name owner --expires 30d --remote
 //   node scripts/bootstrap-admin.mjs --name owner --local        # wrangler dev
+//   node scripts/bootstrap-admin.mjs --name owner --local --persist-to DIR   # a non-default local D1
 //
 // After that, manage tokens in the web UI / admin API.
 
@@ -20,6 +21,7 @@ const { values } = parseArgs({
     local: { type: "boolean", default: false },
     remote: { type: "boolean", default: false },
     binding: { type: "string", default: "DB" },
+    "persist-to": { type: "string" },
   },
 });
 
@@ -30,6 +32,7 @@ function fail(msg) {
 
 if (!values.name || !/^[a-zA-Z0-9_.-]{1,64}$/.test(values.name)) fail("--name is required and must match ^[a-zA-Z0-9_.-]{1,64}$");
 if (values.local === values.remote) fail("pass exactly one of --local or --remote");
+if (values["persist-to"] && !values.local) fail("--persist-to only applies to --local");
 const m = /^(\d+)([dh])$/.exec(values.expires);
 if (!m) fail('--expires must look like "30d" or "12h"');
 const seconds = Number(m[1]) * (m[2] === "d" ? 86400 : 3600);
@@ -46,9 +49,9 @@ const sql =
 
 try {
   // wrangler's own output goes to stderr so stdout carries only the token.
-  execFileSync("npx", ["wrangler", "d1", "execute", values.binding, values.local ? "--local" : "--remote", "--command", sql], {
-    stdio: ["ignore", 2, 2],
-  });
+  const args = ["wrangler", "d1", "execute", values.binding, values.local ? "--local" : "--remote", "--command", sql];
+  if (values["persist-to"]) args.push("--persist-to", values["persist-to"]);
+  execFileSync("npx", args, { stdio: ["ignore", 2, 2] });
 } catch {
   fail("wrangler could not insert the token (does the name already exist? were migrations applied?)");
 }
