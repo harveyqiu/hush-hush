@@ -10,6 +10,8 @@ A minimal self-hosted secret keeper. Single Go binary, SQLite, HTTPS API, AES-25
 
 Built as a personal portfolio project — small enough to read in one sitting (~3k lines + tests), real enough to actually use.
 
+> **Cloudflare version:** [`worker/`](worker/) is a Workers + D1 port of the same service (no VPS needed). The behavior it implements is specified in [`docs/functional-spec.md`](docs/functional-spec.md); the design and differences from this Go build are in [`docs/workers-migration.md`](docs/workers-migration.md).
+
 ## What this is
 
 A tiny HTTPS API for storing your own API keys, database URLs, and OAuth secrets across personal projects. You `PUT` a value, you `GET` it back.
