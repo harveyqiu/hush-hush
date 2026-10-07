@@ -1,6 +1,6 @@
 # hush-hush on Cloudflare Workers
 
-A personal secret store running entirely on Cloudflare (behavior specified in [`../docs/functional-spec.md`](../docs/functional-spec.md); ported from an earlier Go build, now removed): Workers for the API and UI, D1 for storage, a Durable Object for rate limiting. No server to run. How each part maps, and where it deliberately differs from the Go build, is in [`../docs/workers-migration.md`](../docs/workers-migration.md).
+A personal secret store running entirely on Cloudflare (behavior specified in [`../docs/functional-spec.md`](../docs/functional-spec.md); ported from an earlier Go build, now removed): Workers for the API and UI, D1 for storage and rate limiting. No server to run. How each part maps, and where it deliberately differs from the Go build, is in [`../docs/workers-migration.md`](../docs/workers-migration.md).
 
 Before you deploy, read the trade-off: the ciphertext (D1) and the master key (Worker secret) live in the same Cloudflare account, so anyone who takes over that account gets both. Protect it with hardware-key 2FA and a narrowly scoped API token. For secrets that must survive that account being compromised, use the client-side encryption in the [`hush` CLI](../cli/README.md); without it, agents and admins read plaintext over HTTPS.
 

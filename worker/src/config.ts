@@ -1,9 +1,7 @@
-import type { RateLimiter } from "./ratelimit";
 import { decodeMasterKey, importMasterKey } from "./crypto";
 
 export interface Env {
   DB: D1Database;
-  RATE_LIMITER: DurableObjectNamespace<RateLimiter>;
   ASSETS: Fetcher;
   /** Secret: base64 of 32 random bytes. */
   MASTER_KEY: string;

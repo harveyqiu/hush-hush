@@ -3,7 +3,7 @@
 [![worker](https://github.com/harveyqiu/hush-hush/actions/workflows/worker.yml/badge.svg)](https://github.com/harveyqiu/hush-hush/actions/workflows/worker.yml)
 [![License: MIT](https://img.shields.io/github/license/harveyqiu/hush-hush)](LICENSE)
 
-A minimal secret keeper that runs entirely on Cloudflare: one Worker, one D1 database, one Durable Object. HTTPS API, admin web UI, AES-256-GCM at rest, per-agent tokens with read scopes (plus optional create-only write scopes), and an audit log. No server to run.
+A minimal secret keeper that runs entirely on Cloudflare: one Worker, one D1 database. HTTPS API, admin web UI, AES-256-GCM at rest, per-agent tokens with read scopes (plus optional create-only write scopes), and an audit log. No server to run.
 
 Small enough to read in one sitting, real enough to use: the Worker is about 2k lines of TypeScript, the CLI about 1k, plus tests.
 
@@ -65,7 +65,7 @@ agents / you
 │    /v1/secrets  /v1/admin  /ui/  /llm.html  /healthz    │
 │       │                │                                │
 │       ▼                ▼                                │
-│  D1  secrets · tokens · audit_log     Durable Object    │
+│  D1  secrets · tokens · audit_log · rate_limits         │
 │  (ciphertext, token hashes)           (rate-limit       │
 │                                        buckets)         │
 │  Secret: MASTER_KEY        Cron: daily housekeeping     │

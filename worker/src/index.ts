@@ -22,7 +22,6 @@ import { runMaintenance } from "./maintenance";
 import { checkLimit } from "./ratelimit";
 import { resolveSecretsRoute, type Route } from "./secrets";
 
-export { RateLimiter } from "./ratelimit";
 
 // Forbids inline script/style and any third-party origin, so a secret or
 // token name rendered by the page can't turn into markup or script even if

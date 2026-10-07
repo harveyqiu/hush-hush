@@ -14,7 +14,7 @@ declare global {
 
 export const BASE = "https://hush.test";
 
-/** Empties every binding (D1, Durable Objects) and re-applies the schema. */
+/** Empties every binding (D1) and re-applies the schema. */
 export async function resetAll(): Promise<void> {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);

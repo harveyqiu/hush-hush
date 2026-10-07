@@ -1,5 +1,5 @@
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { runMaintenance } from "../src/maintenance";
 import { auditRows, call, env, json, makeToken, resetAll } from "./helpers";
 
 beforeEach(resetAll);
@@ -19,6 +19,14 @@ describe("per-token limit", () => {
     expect(retry).toBeLessThanOrEqual(20);
     // a different token has its own bucket
     expect((await call("/v1/secrets", { token: b, env })).status).toBe(200);
+  });
+
+  it("never over-admits under concurrency", async () => {
+    const a = await makeToken({ name: "a", prefixes: ["x."] });
+    const env = { RATE_LIMIT_PER_MINUTE: "3" };
+    const res = await Promise.all(Array.from({ length: 10 }, () => call("/v1/secrets", { token: a, env })));
+    expect(res.filter((r) => r.status === 200)).toHaveLength(3);
+    expect(res.filter((r) => r.status === 429)).toHaveLength(7);
   });
 
   it("records limited requests as rate_limited", async () => {
@@ -76,12 +84,14 @@ describe("per-IP limit on failed authentication", () => {
 });
 
 describe("limiter state cleans itself up", () => {
-  it("drops a bucket once it has fully refilled, so sprayed IP keys don't pile up", async () => {
+  const rows = async () => (await env.DB.prepare(`SELECT key FROM rate_limits`).all<{ key: string }>()).results.map((r) => r.key);
+
+  it("maintenance drops buckets idle for over a minute, so sprayed IP keys don't pile up", async () => {
     await call("/v1/secrets", { headers: { "CF-Connecting-IP": "203.0.113.50" } }); // spends one failed-auth token
-    const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName("ip:203.0.113.50"));
-    const stored = () => runInDurableObject(stub, (_i, state) => state.storage.get("bucket"));
-    expect(await stored()).toBeDefined();
-    expect(await runDurableObjectAlarm(stub)).toBe(true); // the alarm was scheduled
-    expect(await stored()).toBeUndefined();
+    expect(await rows()).toEqual(["ip:203.0.113.50"]);
+    await runMaintenance(env, Math.floor(Date.now() / 1000));
+    expect(await rows()).toEqual(["ip:203.0.113.50"]); // still recent
+    await runMaintenance(env, Math.floor(Date.now() / 1000) + 120);
+    expect(await rows()).toEqual([]);
   });
 });

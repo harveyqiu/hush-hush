@@ -1,6 +1,6 @@
 # Workers + D1 版设计与迁移
 
-目标：把 [functional-spec.md](functional-spec.md) 描述的服务整套跑在 Cloudflare 上（Workers + D1 + Durable Objects），代码在 `worker/`。Go 版源码后来已从仓库移除，保留在 git 历史里（最后包含它的提交是 `e9d00a1`），所以下文凡是"Go 版"都指那个提交；§6 的迁移路径和 §7 里涉及 Go 的验证，是当时对照真实 Go 构建做的。
+目标：把 [functional-spec.md](functional-spec.md) 描述的服务整套跑在 Cloudflare 上（Workers + D1），代码在 `worker/`。Go 版源码后来已从仓库移除，保留在 git 历史里（最后包含它的提交是 `e9d00a1`），所以下文凡是"Go 版"都指那个提交；§6 的迁移路径和 §7 里涉及 Go 的验证，是当时对照真实 Go 构建做的。
 
 ## 1. 机制映射
 
@@ -11,7 +11,7 @@
 | `database/sql` 事务 | `db.batch([...])` | D1 的 batch 是单个事务，任一语句失败整体回滚 |
 | AES-256-GCM（`crypto/cipher`） | Web Crypto `AES-GCM` | 输出同为 `密文‖16 字节 tag`，AAD 与存储格式不变，**与 Go 版密文互通** |
 | `MASTER_KEY(_FILE)` | Worker Secret `MASTER_KEY` | 不再支持 `_FILE` |
-| 进程内令牌桶 | **Durable Object**（每个 key 一个实例） | Workers 是多实例，进程内存做不了限流；DO 是单线程串行，天然适合令牌桶 |
+| 进程内令牌桶 | **D1 表 `rate_limits`**（每个 key 一行，单条 UPSERT 原子更新） | Workers 是多实例，进程内存做不了限流；不用 Durable Object 是为了不为限流单独付费，D1 本来就是必需组件 |
 | `TRUSTED_PROXIES` + `X-Forwarded-For` | `CF-Connecting-IP` | Worker 只能经 Cloudflare 边缘访问，该头由边缘设置，客户端无法伪造；因此不再需要受信代理配置 |
 | `//go:embed ui` | Workers Static Assets（`ASSETS` 绑定） | `run_worker_first`，由 Worker 加安全头后再回给浏览器 |
 | 管理 CLI（`token` / `audit`） | 管理 HTTP API + UI（已存在）+ 引导脚本 | 见 §3 |
@@ -34,10 +34,11 @@ Go 在同一事务里 upsert + 写审计。Workers 版用一次 `batch`：
 与 Go 相同：handler 返回 `Response` 后先写审计，写失败则丢弃该响应，改回 500 `audit failed`。
 
 ### 2.3 限流（规格 §7）
-- 每个 key（`token:<name>` / `ip:<bucket>`）一个 DO 实例，状态是 `{tokens, last}`，存在 DO storage 里（实例被回收后不丢）。
-- 每次请求后设置 alarm，在"桶完全补满"的时刻清空存储，对应 Go 的"丢弃已满的桶"。攻击者喷洒 IP 产生的实例会自行消亡。
+- 每个 key（`token:<name>` / `ip:<bucket>`）在 `rate_limits` 表里一行，状态是 `{tokens, last_ms}`。一条 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 完成补充、扣减和判定，D1 串行执行单条语句，并发请求不会重复花同一个令牌。
+- 桶闲置超过一分钟就已补满（无论额度多大），每日 Cron 删除这些行，对应 Go 的"丢弃已满的桶"。攻击者喷洒 IP 产生的行最多保留到下次 Cron。
+- 代价：每个通过认证的请求多一次 D1 写（免费档每天 10 万行写入，个人用量够；未认证请求只在认证失败时才写）。
 - IPv6 按 /64 归并，同 Go。
-- **失败策略（有意差异）**：DO 调用异常时**放行并记录错误日志**（fail open）。Go 的内存限流器不会失败；这里若 fail closed，一次 DO 故障就会把所有合法 agent 锁在外面。限流在这里是滥用控制，不是认证边界——token 是 256 位随机数，无法被暴力破解。
+- **失败策略（有意差异）**：D1 限流写入异常时**放行并记录错误日志**（fail open）。Go 的内存限流器不会失败；这里若 fail closed，一次限流故障就会把所有合法 agent 锁在外面。限流在这里是滥用控制，不是认证边界——token 是 256 位随机数，无法被暴力破解。
 
 ### 2.4 请求体读取
 Workers 没有 `io.LimitReader`。用流式 reader 读取，累计超过 `maxBodyBytes+1` 立刻 `cancel()`，不会把大 body 读进内存。
@@ -66,7 +67,7 @@ Go 版靠 `docker exec ... token create` 直接写库。Workers 上没有"本地
 |---|---|---|
 | 1 | JSON 体有多余内容或非法时，统一返回 400 `invalid json`（Go 对"尾随数据"返回 `trailing data after json`） | 状态码相同，仅文案不同；`JSON.parse` 不暴露前缀边界 |
 | 2 | 读前缀数量上限 64 | D1 绑定参数上限 |
-| 3 | 限流 DO 故障时放行 | 见 §2.3 |
+| 3 | 限流写入故障时放行 | 见 §2.3 |
 | 4 | 不支持 `MASTER_KEY_FILE`、`TRUSTED_PROXIES`、`LISTEN_ADDR`、`DB_PATH` | 在 Cloudflare 上无意义 |
 | 5 | `ADMIN_API=false` 时 `/v1/admin/*` 返回 JSON 404（Go 是 mux 的纯文本 404） | 无安全影响 |
 | 6 | 启动期警告（无活跃 token、admin token 7 天内到期）改在每日 Cron 里记日志；UI 横幅仍可用 | Worker 没有启动阶段 |
@@ -107,10 +108,10 @@ npx wrangler secret put MASTER_KEY        # 粘贴 Go 版 MASTER_KEY 的值
 | 真实 Go 客户端 | 构建 `cmd/hush`，对 `wrangler dev` 跑通 `health / put / get / list / delete`，错误场景（404、401）正常；开启 v2 客户端加密（`init` + `put` + `get`）通过，服务端只见 `hh2:` 不透明密文 |
 | 管理 UI | 用 Chromium 打开：登录、Secrets / Tokens / 审计三个页签都正常渲染，严格 CSP 下无脚本错误 |
 | Go → Workers 迁移 | 用真实 Go 服务端生成库（2 个 secret、admin / agent / 已吊销三个 token），按 §6 导入本地 D1：Go 签发的 token 可直接认证，Go 加密的 secret 能解密，吊销与写前缀授权保持有效 |
-| 部署配置 | `wrangler deploy --dry-run` 通过：打包 44.6 KiB、无运行时依赖，D1 / DO / Assets 绑定正确 |
+| 部署配置 | `wrangler deploy --dry-run` 通过：打包 44.6 KiB、无运行时依赖，D1 / Assets 绑定正确 |
 
 **没有验证的部分**（需要你的 Cloudflare 账号）：
-- 真实部署与真实 D1（验证都在本地 miniflare / `wrangler dev` 里完成，D1 与 DO 的语义由 workerd 提供，但没跑过线上延迟、配额）。
+- 真实部署与真实 D1（验证都在本地 miniflare / `wrangler dev` 里完成，D1 的语义由 workerd 提供，但没跑过线上延迟、配额）。
 - Cron Trigger 的真实触发（逻辑由 `scheduled()` 的测试覆盖）。
 - 导出步骤用的是 Python `sqlite3.iterdump()`（本机没有 `sqlite3` 命令行），它与命令行 `.dump` 的 `INSERT` 输出格式一致；改用命令行时请先在 `--local` 上演练一遍。
 
@@ -131,7 +132,7 @@ worker/
     secrets.ts          /v1/secrets 处理
     admin.ts            /v1/admin 处理
     audit.ts            审计写入与查询
-    ratelimit.ts        Durable Object + 客户端
+    ratelimit.ts        D1 令牌桶
     http.ts             JSON 响应、请求 ID、客户端 IP、body 读取
     duration.ts         expires / since 的解析
   public/ui/            与根目录 ui/ 相同的静态文件

@@ -28,7 +28,7 @@ jobs:
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
       - run: npm run typecheck
-      # Runs inside workerd, with D1 and Durable Objects.
+      # Runs inside workerd, with D1.
       - run: npm test
       # Validates wrangler.jsonc, the bindings and the bundle without
       # deploying or needing Cloudflare credentials.

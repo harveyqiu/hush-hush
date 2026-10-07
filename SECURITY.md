@@ -31,7 +31,7 @@ This is a deliberately minimal tool for one operator and a handful of agents. Th
 - **Agents see plaintext values**: an agent token can read the values under its prefixes. Access control limits *which* secrets an agent gets, not what it does with them.
 - **Cloudflare-level bypass**: anyone with access to the D1 database plus the Worker secrets can read everything directly, skipping tokens, prefixes and the audit log. Agents must never have Cloudflare account access.
 - **Agent-created secrets**: an agent with write prefixes can create new names there (never overwrite or delete). Anything that reads that namespace should treat those values as agent-supplied.
-- **Rate limiting fails open**: if the rate-limit Durable Object is unavailable, requests are allowed (and an error is logged). Tokens are 256-bit random values, so the limiter is abuse control, not the authentication boundary.
+- **Rate limiting fails open**: if the rate-limit table in D1 can't be updated, requests are allowed (and an error is logged). Tokens are 256-bit random values, so the limiter is abuse control, not the authentication boundary.
 - **Audit `remote_addr`** comes from `CF-Connecting-IP`, which Cloudflare sets at its edge.
 - **Token management over HTTP**: the admin API and web UI let an admin token create tokens. A leaked admin token can therefore mint new tokens and persist; admin tokens are for humans and always expire (at most 90 days, enforced on create and at authentication); set `ADMIN_API=false` to remove the admin API and UI entirely. Every admin call is audited.
 - **No master-key rotation** and no key escrow: losing `MASTER_KEY` makes stored values unrecoverable.

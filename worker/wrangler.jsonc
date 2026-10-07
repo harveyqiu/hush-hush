@@ -15,11 +15,14 @@
     }
   ],
 
-  // Token-bucket rate limiter: one Durable Object per key.
-  "durable_objects": {
-    "bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }],
+  // The rate limiter used to be a Durable Object; it now lives in D1
+  // (src/ratelimit.ts). These migrations create the class and then delete it,
+  // so a Worker that was deployed with it is cleaned up. A fresh deploy
+  // can delete them both.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RateLimiter"] },
+    { "tag": "v2", "deleted_classes": ["RateLimiter"] }
+  ],
 
   // Admin UI. The Worker runs first so it can add the security headers.
   "assets": {

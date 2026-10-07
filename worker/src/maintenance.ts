@@ -5,6 +5,7 @@
 import type { Env } from "./config";
 import { ConfigError, positiveInt } from "./config";
 import { logEvent } from "./http";
+import { pruneRateLimits } from "./ratelimit";
 
 const WEEK_SECONDS = 7 * 24 * 3600;
 
@@ -29,6 +30,8 @@ export async function runMaintenance(env: Env, nowSec: number): Promise<void> {
       tokens: results.map((r) => r.name),
     });
   }
+
+  await pruneRateLimits(env.DB, nowSec * 1000);
 
   let days: number | null = null;
   try {
